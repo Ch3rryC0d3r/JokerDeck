@@ -1059,6 +1059,20 @@ class JokerDeck(tk.Tk):
         # main display panel (hidden during load)
         main_frame = tk.Frame(win, bg=BG)
 
+        card_widgets = []
+        image_cache = {}  # Keeps PhotoImage references alive to prevent garbage collection
+        downloading_icons = set()
+        icon_threads_pool = [] # Track background workers
+
+        # Create a tiny 32x32 transparent or solid placeholder block using PIL
+        placeholder_img = None
+        if PIL_AVAILABLE:
+            try:
+                from PIL import Image, ImageTk
+                placeholder_img = ImageTk.PhotoImage(Image.new("RGBA", (32, 32), (0, 0, 0, 0)))
+            except Exception:
+                pass
+
         def fetch_index_thread():
             try:
                 url = "https://raw.githubusercontent.com/Ch3rryC0d3r/JokerDeckIndex/refs/heads/main/mod.json"
@@ -1071,6 +1085,112 @@ class JokerDeck(tk.Tk):
 
         def show_error(msg):
             load_lbl.configure(text=msg, fg=ACCENT)
+
+        def lazy_load_visible_icons(canvas, scroll_container):
+            """Calculates which cards are on screen and kicks off background icon downloads instantly."""
+            if not PIL_AVAILABLE:
+                return
+
+            try:
+                canvas_height = canvas.winfo_height()
+                v_start, v_end = canvas.yview()
+                container_total_height = scroll_container.winfo_height()
+                
+                scroll_top_pixel = v_start * container_total_height
+                scroll_bottom_pixel = v_end * container_total_height
+            except Exception:
+                return
+
+            for item in card_widgets:
+                mod_id = item["id"]
+                if mod_id in image_cache or mod_id in downloading_icons:
+                    continue
+                
+                card_frame = item["frame"]
+                card_y = card_frame.winfo_y()
+                card_h = card_frame.winfo_height()
+                
+                # Check if card is visible or right below the fold (buffer for smooth scrolling)
+                if (card_y + card_h >= scroll_top_pixel - 100) and (card_y <= scroll_bottom_pixel + 300):
+                    downloading_icons.add(mod_id)
+                    t = threading.Thread(
+                        target=fetch_single_icon_thread, 
+                        args=(item["git_url"], mod_id, item["icon_label"]), 
+                        daemon=True
+                    )
+                    icon_threads_pool.append(t)
+                    t.start()
+
+        def fetch_single_icon_thread(repo_url, mod_id, target_label):
+            try:
+                clean_url = repo_url.replace("https://github.com/", "").strip("/")
+                parts = clean_url.split("/")
+                if len(parts) < 2:
+                    return
+                owner, repo = parts[0], parts[1]
+                
+                img_data = None
+                chosen_branch = None
+                chosen_file = None
+
+                # Query the official API endpoint to get a guaranteed directory file list
+                for br in ["master", "main"]:
+                    dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
+                    try:
+                        req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
+                        with urllib.request.urlopen(req, timeout=2) as resp:
+                            items = json.loads(resp.read().decode("utf-8"))
+                            
+                            # Safely extract names from the standard API list format
+                            png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
+                            
+                            if png_files:
+                                # Run your exact local prioritization sorting method
+                                sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
+                                chosen_file = sorted_pngs[0]
+                                chosen_branch = br
+                                break
+                    except Exception:
+                        continue
+
+                # Download file utilizing the discovered filename
+                if chosen_file:
+                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{chosen_branch}/assets/1x/{chosen_file}"
+                    try:
+                        req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
+                        with urllib.request.urlopen(req, timeout=1.5) as resp:
+                            img_data = resp.read()
+                    except Exception:
+                        pass
+
+                if img_data:
+                    from io import BytesIO
+                    from PIL import Image, ImageTk
+                    
+                    im = Image.open(BytesIO(img_data)).convert("RGBA")
+                    w, h = im.size
+                    if w == h and 16 < w < 48:
+                        im = im.resize((32, 32), Image.Resampling.NEAREST)
+                        tk_img = ImageTk.PhotoImage(im)
+                        win.after(5, lambda: apply_icon(mod_id, tk_img, target_label))
+            except Exception:
+                pass
+            finally:
+                if mod_id in downloading_icons:
+                    downloading_icons.remove(mod_id)
+
+        def apply_icon(mod_id, tk_img, target_label):
+            image_cache[mod_id] = tk_img
+            try:
+                if target_label.winfo_exists():
+                    target_label.configure(image=tk_img)
+            except Exception:
+                pass
+
+        def apply_icon(mod_id, tk_img, target_label):
+            image_cache[mod_id] = tk_img
+            if target_label.winfo_exists():
+                target_label.configure(image=tk_img)
 
         def setup_browser_ui(mod_list):
             load_frame.pack_forget()
@@ -1092,7 +1212,18 @@ class JokerDeck(tk.Tk):
             def check_width(e):
                 canvas.itemconfig(1, width=e.width)
             canvas.bind("<Configure>", check_width)
-            scroll_container.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+            
+            # Update scroll region bounding frames and run lazy loader updates immediately on viewport config adjustments
+            scroll_container.bind("<Configure>", lambda _: [
+                canvas.configure(scrollregion=canvas.bbox("all")),
+                win.after(100, lambda: lazy_load_visible_icons(canvas, scroll_container))
+            ])
+
+            # Hook the lazy icon display calculator straight into your scrolling behavior loops
+            canvas.configure(yscrollcommand=lambda *args: [
+                scrollbar.set(*args), 
+                lazy_load_visible_icons(canvas, scroll_container)
+            ])
 
             # load data cards
             for m in mod_list:
@@ -1103,11 +1234,29 @@ class JokerDeck(tk.Tk):
                 top = tk.Frame(card, bg=PANEL)
                 top.pack(fill="x", padx=12, pady=(8, 2))
 
-                tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
-                tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=2)
+                # Inject the icon label container right next to the title text component frame element
+                icon_lbl = tk.Label(top, bg=PANEL, image=placeholder_img)
+                icon_lbl.pack(side="left", padx=(0, 8))
 
+                tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
+                tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=4)
+
+                # Download Button
                 btn = self._btn(top, "Download", lambda mod=m: start_download(mod), bg=BG, fg=TEXT, font=(FONT_FAMILY, 14))
-                btn.pack(side="right")
+                btn.pack(side="right", padx=(4, 0))
+
+                # Repo Button (Opens the GitHub link in the user's browser)
+                import webbrowser
+                repo_url = m.get("git_url", "")
+                repo_btn = self._btn(
+                    top, 
+                    "Repo", 
+                    lambda url=repo_url: webbrowser.open(url) if url else None, 
+                    bg=PANEL, 
+                    fg=SUBTEXT, 
+                    font=(FONT_FAMILY, 14)
+                )
+                repo_btn.pack(side="right", padx=4)
 
                 mid = tk.Frame(card, bg=PANEL)
                 mid.pack(fill="x", padx=12, pady=(0, 4))
@@ -1115,6 +1264,18 @@ class JokerDeck(tk.Tk):
 
                 desc = tk.Label(card, text=m.get("description", ""), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 16), justify="left", anchor="w", wraplength=650)
                 desc.pack(fill="x", padx=12, pady=(2, 10))
+
+                # Append metadata references to tracking arrays for execution management tracking hooks
+                card_widgets.append({
+                    "id": m.get("id", "unknown"),
+                    "git_url": m.get("git_url", ""),
+                    "frame": card,
+                    "icon_label": icon_lbl
+                })
+
+            # Instantly load the first batch of visible ones on screen without delay
+            win.after(10, lambda: lazy_load_visible_icons(canvas, scroll_container))
+            win.after(100, lambda: lazy_load_visible_icons(canvas, scroll_container))
 
         def start_download(mod):
             target_dir = Path(self.cfg["mods_dir"])
@@ -1165,37 +1326,32 @@ class JokerDeck(tk.Tk):
 
                 # extraction step
                 win.after(10, lambda: load_lbl.configure(text=f"extracting {mod['name']}...\nplease wait..."))
-                extract_root = target_dir / f"temp_extract_{mod['id']}"
-                if extract_root.exists():
-                    shutil.rmtree(extract_root)
-
-                with zipfile.ZipFile(tmp_zip, "r") as zip_ref:
-                    zip_ref.extractall(extract_root)
-
-                # github wraps zips inside a 'repo-master' parent directory, let's find it
-                subdirs = [x for x in extract_root.iterdir() if x.is_dir()]
-                if not subdirs:
-                    raise Exception("corrupted zip archive structure")
-                github_payload_folder = subdirs[0]
-
-                # finalize folder naming scheme inside /Mods
                 final_folder_destination = target_dir / mod["id"]
                 if final_folder_destination.exists():
                     shutil.rmtree(final_folder_destination)
-                
-                shutil.move(str(github_payload_folder), str(final_folder_destination))
+                final_folder_destination.mkdir(parents=True, exist_ok=True)
 
-                # clean up temp junk files
+                with zipfile.ZipFile(tmp_zip, "r") as zip_ref:
+                    for member in zip_ref.infolist():
+                        parts = Path(member.filename).parts
+                        if len(parts) <= 1:
+                            continue
+                        
+                        target_path = final_folder_destination / Path(*parts[1:])
+                        
+                        if member.is_dir():
+                            target_path.mkdir(parents=True, exist_ok=True)
+                        else:
+                            target_path.parent.mkdir(parents=True, exist_ok=True)
+                            with zip_ref.open(member) as source, open(target_path, "wb") as target_file:
+                                shutil.copyfileobj(source, target_file)
+
                 if tmp_zip.exists():
                     tmp_zip.unlink()
-                if extract_root.exists():
-                    shutil.rmtree(extract_root)
 
-                # automatically force disable the mod safely by dropping the ignore file flag
                 ignore_flag = final_folder_destination / IGNORE_FILE
                 ignore_flag.touch()
 
-                # success callback wrapper
                 win.after(10, lambda: download_success(mod))
 
             except Exception as e:
