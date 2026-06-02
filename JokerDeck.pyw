@@ -13,6 +13,9 @@ import shutil
 import subprocess
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
+import urllib.request
+import zipfile
+import threading
 from pathlib import Path
 from ctypes import windll, byref, create_unicode_buffer
 
@@ -416,7 +419,8 @@ class JokerDeck(tk.Tk):
         tk.Label(hdr, text="JokerDeck", bg=PANEL, fg=ACCENT, font=(FONT_FAMILY, 36, "bold")).pack(side="left", padx=(20, 8), pady=10)
         tk.Label(hdr, text=f"|  v{self._version}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left", pady=24)
 
-        self._btn(hdr, "⚙ Settings", self._open_settings, bg=PANEL, fg=SUBTEXT, pad=(12, 8)).pack(side="right", padx=15)
+        self._btn(hdr, "⚙ Settings", self._open_settings, bg=PANEL, fg=SUBTEXT, pad=(12, 8)).pack(side="right", padx=(0, 15))
+        self._btn(hdr, "🌐 Browse Mods", self._open_browse, bg=PANEL, fg=SUBTEXT, pad=(12, 8)).pack(side="right", padx=(0, 4))
         tk.Frame(self, bg=BORDER, height=1).pack(fill="x")
 
     def _build_toolbar(self):
@@ -1039,6 +1043,171 @@ class JokerDeck(tk.Tk):
                   bg=ACCENT, fg=PANEL, font=(FONT_FAMILY, 18, "bold")).pack(side="right")
         self._btn(btn_frame, "Cancel", win.destroy,
                   bg=BG, fg=SUBTEXT).pack(side="right", padx=(0, 8))
+
+    def _open_browse(self):
+        win = tk.Toplevel(self)
+        win.title("Browse Online Mods")
+        win.state('zoomed')
+        win.configure(bg=BG)
+        
+        # loading state panel
+        load_frame = tk.Frame(win, bg=BG)
+        load_frame.pack(fill="both", expand=True)
+        load_lbl = tk.Label(load_frame, text="loading...", bg=BG, fg=TEXT, font=(FONT_FAMILY, 24))
+        load_lbl.pack(expand=True)
+
+        # main display panel (hidden during load)
+        main_frame = tk.Frame(win, bg=BG)
+
+        def fetch_index_thread():
+            try:
+                url = "https://raw.githubusercontent.com/Ch3rryC0d3r/JokerDeckIndex/refs/heads/main/mod.json"
+                req = urllib.request.Request(url, headers={"User-Agent": "JokerDeck-Manager"})
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json.loads(response.read().decode("utf-8"))
+                win.after(10, lambda: setup_browser_ui(data))
+            except Exception as e:
+                win.after(10, lambda: show_error(f"failed to load index:\n{e}"))
+
+        def show_error(msg):
+            load_lbl.configure(text=msg, fg=ACCENT)
+
+        def setup_browser_ui(mod_list):
+            load_frame.pack_forget()
+            main_frame.pack(fill="both", expand=True, padx=15, pady=15)
+
+            # title
+            tk.Label(main_frame, text="available mods", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 24, "bold"), anchor="w").pack(fill="x", pady=(0, 10))
+
+            # scrollable window setup
+            canvas = tk.Canvas(main_frame, bg=BG, bd=0, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+
+            scroll_container = tk.Frame(canvas, bg=BG)
+            canvas.create_window((0, 0), window=scroll_container, anchor="nw")
+            
+            def check_width(e):
+                canvas.itemconfig(1, width=e.width)
+            canvas.bind("<Configure>", check_width)
+            scroll_container.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+
+            # load data cards
+            for m in mod_list:
+                card = tk.Frame(scroll_container, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
+                card.pack(fill="x", pady=4, padx=2)
+                tk.Frame(card, bg=DISABLED, height=3).pack(fill="x")
+
+                top = tk.Frame(card, bg=PANEL)
+                top.pack(fill="x", padx=12, pady=(8, 2))
+
+                tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
+                tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=2)
+
+                btn = self._btn(top, "Download", lambda mod=m: start_download(mod), bg=BG, fg=TEXT, font=(FONT_FAMILY, 14))
+                btn.pack(side="right")
+
+                mid = tk.Frame(card, bg=PANEL)
+                mid.pack(fill="x", padx=12, pady=(0, 4))
+                tk.Label(mid, text=f"by {m.get('author', 'unknown')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left")
+
+                desc = tk.Label(card, text=m.get("description", ""), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 16), justify="left", anchor="w", wraplength=650)
+                desc.pack(fill="x", padx=12, pady=(2, 10))
+
+        def start_download(mod):
+            target_dir = Path(self.cfg["mods_dir"])
+            final_folder_destination = target_dir / mod["id"]
+            if final_folder_destination.exists():
+                if not messagebox.askyesno("JokerDeck", f"you already have a folder named '{mod['id']}' installed.\n\ndo you want to overwrite it?"):
+                    return
+
+            # lock layout down for visual feedback
+            load_frame.pack(fill="both", expand=True)
+            main_frame.pack_forget()
+            load_lbl.configure(text=f"downloading {mod['name']}...\n(starting connection)", fg=TEXT)
+            
+            threading.Thread(target=download_engine_thread, args=(mod,), daemon=True).start()
+
+        def download_engine_thread(mod):
+            try:
+                repo_url = mod.get("git_url", "")
+                if not repo_url:
+                    raise Exception("missing github repository url field")
+                
+                zip_url = repo_url.rstrip("/") + "/archive/refs/heads/master.zip"
+                target_dir = Path(self.cfg["mods_dir"])
+                target_dir.mkdir(parents=True, exist_ok=True)
+                tmp_zip = target_dir / f"temp_jokerdeck_{mod['id']}.zip"
+
+                def run_chunk_download(url_target):
+                    req = urllib.request.Request(url_target, headers={"User-Agent": "JokerDeck-Manager"})
+                    with urllib.request.urlopen(req, timeout=15) as response, open(tmp_zip, "wb") as out_file:
+                        total_bytes = 0
+                        while True:
+                            chunk = response.read(16 * 1024)
+                            if not chunk:
+                                break
+                            out_file.write(chunk)
+                            total_bytes += len(chunk)
+                            mb_downloaded = total_bytes / (1024 * 1024)
+                            win.after(10, lambda b=mb_downloaded: load_lbl.configure(text=f"downloading {mod['name']}...\n{b:.2f} mb fetched"))
+
+                try:
+                    run_chunk_download(zip_url)
+                except Exception as e:
+                    if "404" in str(e):
+                        zip_url = repo_url.rstrip("/") + "/archive/refs/heads/main.zip"
+                        run_chunk_download(zip_url)
+                    else:
+                        raise e
+
+                # extraction step
+                win.after(10, lambda: load_lbl.configure(text=f"extracting {mod['name']}...\nplease wait..."))
+                extract_root = target_dir / f"temp_extract_{mod['id']}"
+                if extract_root.exists():
+                    shutil.rmtree(extract_root)
+
+                with zipfile.ZipFile(tmp_zip, "r") as zip_ref:
+                    zip_ref.extractall(extract_root)
+
+                # github wraps zips inside a 'repo-master' parent directory, let's find it
+                subdirs = [x for x in extract_root.iterdir() if x.is_dir()]
+                if not subdirs:
+                    raise Exception("corrupted zip archive structure")
+                github_payload_folder = subdirs[0]
+
+                # finalize folder naming scheme inside /Mods
+                final_folder_destination = target_dir / mod["id"]
+                if final_folder_destination.exists():
+                    shutil.rmtree(final_folder_destination)
+                
+                shutil.move(str(github_payload_folder), str(final_folder_destination))
+
+                # clean up temp junk files
+                if tmp_zip.exists():
+                    tmp_zip.unlink()
+                if extract_root.exists():
+                    shutil.rmtree(extract_root)
+
+                # automatically force disable the mod safely by dropping the ignore file flag
+                ignore_flag = final_folder_destination / IGNORE_FILE
+                ignore_flag.touch()
+
+                # success callback wrapper
+                win.after(10, lambda: download_success(mod))
+
+            except Exception as e:
+                win.after(10, lambda: show_error(f"failed download:\n{e}"))
+
+        def download_success(mod):
+            messagebox.showinfo("JokerDeck", f"successfully installed {mod['name']}!\nit has been disabled by default so you can toggle it when ready.")
+            self._refresh_mods()
+            win.destroy()
+
+        # kick off thread instantly
+        threading.Thread(target=fetch_index_thread, daemon=True).start()
 
     # canvas layout
     def _on_frame_configure(self, _event=None):
