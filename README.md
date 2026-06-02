@@ -53,4 +53,17 @@ then just run `JokerDeck.pyw` and you're good.
 
 ---
 
+<table>
+  <tr>
+    <td><img src="previews/preview_01.png" width="100%"/></td>
+    <td><img src="previews/preview_02.png" width="100%"/></td>
+  </tr>
+  <tr>
+    <td><img src="previews/preview_03.png" width="100%"/></td>
+    <td><img src="previews/preview_04.png" width="100%"/></td>
+  </tr>
+</table>
+
+---
+
 made with ❤ and way too much free time
