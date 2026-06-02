@@ -1,0 +1,10 @@
+dist.bat
+jokerdeck_config.json
+conf.json
+run.bat
+dist/
+build/
+joker-deck/
+JokerDeck.spec
+__pycache__/
+*.pyc
