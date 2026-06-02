@@ -48,7 +48,7 @@ def load_custom_font(font_filename: str) -> str:
     return "Arial"
 
 # defaults
-DEFAULT_MODS_DIR  = r"C:\\Users\\covec\\AppData\\Roaming\\Balatro\\Mods",
+DEFAULT_MODS_DIR  = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Balatro", "Mods")
 DEFAULT_GAME_PATH = r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro"
 GAME_EXE_NAME     = "Balatro.exe"
 CONFIG_FILE       = Path(__file__).parent / "jokerdeck_config.json"
@@ -211,6 +211,31 @@ def get_mods(mods_dir: str) -> list[dict]:
         })
     return mods
 
+def parse_conflict_id(conflict_str: str) -> str:
+    # pull just the mod id out of something like "Talisman (>=1.1) (<<2~)"
+    return conflict_str.strip().split("(")[0].strip()
+
+def find_conflicts(mods: list[dict]) -> set[str]:
+    # returns paths of any mod that is in a conflict pair with another installed mod
+    id_to_path = {}
+    conflicts_map = {}
+
+    for m in mods:
+        mod_id = m.get("id", "").strip().lower()
+        if mod_id:
+            id_to_path[mod_id] = str(m["path"])
+        raw_conflicts = m.get("conflicts", [])
+        if isinstance(raw_conflicts, list) and raw_conflicts:
+            conflicts_map[str(m["path"])] = [parse_conflict_id(c).lower() for c in raw_conflicts]
+
+    flagged = set()
+    for mod_path, conflict_ids in conflicts_map.items():
+        for cid in conflict_ids:
+            if cid in id_to_path:
+                flagged.add(mod_path)
+                flagged.add(id_to_path[cid])
+    return flagged
+
 def set_mod_enabled(mod: dict, enabled: bool):
     ignore_path = mod["path"] / IGNORE_FILE
     if enabled:
@@ -220,14 +245,47 @@ def set_mod_enabled(mod: dict, enabled: bool):
         ignore_path.touch()
     mod["enabled"] = enabled
 
+def get_uninstalled_dir(mods_dir: str) -> Path:
+    # new home is Balatro/Uninstalled/ (one level above /Mods)
+    return Path(mods_dir).parent / UNINSTALLED_DIR
+
 def uninstall_mod(mod: dict, mods_dir: str):
-    """Moves mod folder from Mods/ into Mods/Uninstalled/."""
-    uninstalled = Path(mods_dir) / UNINSTALLED_DIR
+    # moves mod folder out of /Mods and into Balatro/Uninstalled/
+    uninstalled = get_uninstalled_dir(mods_dir)
     uninstalled.mkdir(exist_ok=True)
     dest = uninstalled / mod["path"].name
     if dest.exists():
         shutil.rmtree(dest)
     shutil.move(str(mod["path"]), str(dest))
+
+def reinstall_mod(mod: dict, mods_dir: str):
+    # moves mod folder back from wherever it ended up (new or old location) into /Mods
+    dest = Path(mods_dir) / mod["path"].name
+    if dest.exists():
+        shutil.rmtree(dest)
+    shutil.move(str(mod["path"]), str(dest))
+
+def get_uninstalled_mods(mods_dir: str) -> list[dict]:
+    # checks both Balatro/Uninstalled/ and the old Mods/Uninstalled/ so nothing gets orphaned
+    found = []
+    locations = [
+        get_uninstalled_dir(mods_dir),
+        Path(mods_dir) / UNINSTALLED_DIR,
+    ]
+    for base in locations:
+        if not base.exists():
+            continue
+        for entry in sorted(base.iterdir()):
+            if not entry.is_dir():
+                continue
+            # mod-reading logic but mark it as uninstalled
+            dummy = get_mods(str(base))
+            for m in dummy:
+                if m["path"].name == entry.name:
+                    m["uninstalled"] = True
+                    found.append(m)
+                    break
+    return found
 
 # launch helpers
 def launch_game(game_path: str, vanilla: bool = False):
@@ -259,7 +317,7 @@ class JokerDeck(tk.Tk):
         self.cfg = load_config()
         apply_theme(self.cfg.get("dark_mode", False)) # light mode
         try:
-            with open(Path(__file__).parent / "conf.json", "r") as f:
+            with open(Path(__file__).parent / "ver.json", "r") as f:
                 self._version = json.load(f).get("version", "")
         except Exception:
             self._version = ""
@@ -280,6 +338,9 @@ class JokerDeck(tk.Tk):
         # undo/redo stacks
         self._undo_stack: list[list[ToggleAction]] = []
         self._redo_stack: list[list[ToggleAction]] = []
+
+        # tracks when each mod was last toggled this session, for the sort
+        self._toggle_times: dict[str, float] = {}
 
         # ui caching
         self._card_cache = []
@@ -321,6 +382,13 @@ class JokerDeck(tk.Tk):
         self._build_toolbar()
         self._build_mod_grid()
         self._build_footer()
+        self._bind_shortcuts()
+
+    def _bind_shortcuts(self):
+        self.bind_all("<Control-z>", lambda e: self._undo())
+        self.bind_all("<Control-y>", lambda e: self._redo())
+        self.bind_all("<Control-a>", lambda e: self._select_all())
+        self.bind_all("<Escape>",    lambda e: self._deselect_all())
 
     def _style_ttk(self):
         s = ttk.Style(self)
@@ -378,15 +446,28 @@ class JokerDeck(tk.Tk):
         sort_frame.pack(side="right", padx=(0, 15))
         tk.Label(sort_frame, text="Sort: ", bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 18)).pack(side="left")
         self.sort_combo = ttk.Combobox(sort_frame, textvariable=self._sort_var,
-                                        values=["Name (A-Z)", "Name (Z-A)", "Only of author(s):", "Enabled Only", "Disabled Only"],
                                         state="readonly", font=(FONT_FAMILY, 18), width=18)
         self.sort_combo.pack(side="left")
         self.sort_combo.bind("<<ComboboxSelected>>", self._on_sort_change)
         self.author_btn = self._btn(sort_frame, "Select Authors...", self._toggle_author_popup, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18), pad=(10, 4)) # author selection
 
+        self._update_sort_options()
         self._update_undo_redo_btns()
 
+    def _update_sort_options(self):
+        base_options = ["Name (A-Z)", "Name (Z-A)"]
+        if self._all_authors:
+            base_options.append("Only of author(s):")
+        base_options.extend(["Enabled Only", "Disabled Only", "Recently Toggled", "Uninstalled"])
+        
+        current_selection = self._sort_var.get()
+        self.sort_combo.configure(values=base_options)
+        if current_selection not in base_options:
+            self._sort_var.set("Name (A-Z)")
+
     def _on_sort_change(self, event=None):
+        self.sort_combo.selection_clear()
+        self.focus_set()
         if self._sort_var.get() == "Only of author(s):":
             self.author_btn.pack(side="left", padx=(8, 0))
         else:
@@ -484,7 +565,8 @@ class JokerDeck(tk.Tk):
         inner.pack(fill="both", expand=True, padx=20)
         self._sel_count_lbl = tk.Label(inner, text="0 selected", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 18))
         self._sel_count_lbl.pack(side="left", padx=(0, 16))
-        self._btn(inner, "🗑 Uninstall",  self._bulk_uninstall,  bg=BG,    fg=ACCENT,   font=(FONT_FAMILY, 18), pad=(12, 6)).pack(side="left", padx=(0, 6))
+        self._bulk_uninstall_btn = self._btn(inner, "🗑 Uninstall",  self._bulk_uninstall,  bg=BG,    fg=ACCENT,   font=(FONT_FAMILY, 18), pad=(12, 6))
+        self._bulk_uninstall_btn.pack(side="left", padx=(0, 6))
         self._btn(inner, "🟩 Enable",     self._bulk_enable,     bg=BG,    fg=ENABLED,  font=(FONT_FAMILY, 18), pad=(12, 6)).pack(side="left", padx=(0, 6))
         self._btn(inner, "🟥 Disable",    self._bulk_disable,    bg=BG,    fg=ACCENT,   font=(FONT_FAMILY, 18), pad=(12, 6)).pack(side="left", padx=(0, 6))
         self._btn(inner, "Select All",    self._select_all,     bg=PANEL, fg=SUBTEXT,  font=(FONT_FAMILY, 18), pad=(12, 6)).pack(side="right", padx=(0, 6))
@@ -534,14 +616,26 @@ class JokerDeck(tk.Tk):
         self._sel_count_lbl.configure(text=f"{len(self._selected_mods)} selected")
         if self._selected_mods:
             self._action_bar.pack(fill="x")
+            self._update_bulk_uninstall_btn_text()
         else:
             self._action_bar.pack_forget()
 
+    def _update_bulk_uninstall_btn_text(self):
+        sel = self._get_selected_mods()
+        if sel and all(m.get("uninstalled") for m in sel):
+            self._bulk_uninstall_btn.configure(text="🟩 Install", fg=ENABLED)
+        else:
+            self._bulk_uninstall_btn.configure(text="🗑 Uninstall", fg=ACCENT)
+
     def _select_all(self):
-            for m in self.mods:
+            sort_mode = self._sort_var.get()
+            pool = get_uninstalled_mods(self.cfg["mods_dir"]) if sort_mode == "Uninstalled" else self.mods
+            for m in pool:
                 self._selected_mods.add(str(m["path"]))
             self._sel_count_lbl.configure(text=f"{len(self._selected_mods)} selected")
+      
             self._action_bar.pack(fill="x")
+            self._update_bulk_uninstall_btn_text()
             self._render_mods()
 
     def _deselect_all(self):
@@ -553,7 +647,8 @@ class JokerDeck(tk.Tk):
         self._render_mods()
 
     def _get_selected_mods(self) -> list[dict]:
-        return [m for m in self.mods if str(m["path"]) in self._selected_mods]
+        pool = self.mods + get_uninstalled_mods(self.cfg["mods_dir"])
+        return [m for m in pool if str(m["path"]) in self._selected_mods]
 
     def _bulk_enable(self):
         sel = self._get_selected_mods()
@@ -583,17 +678,30 @@ class JokerDeck(tk.Tk):
         sel = self._get_selected_mods()
         if not sel:
             return
+        
+        is_install_mode = all(m.get("uninstalled") for m in sel)
+        title = "Install Mods" if is_install_mode else "Uninstall Mods"
+        prompt = f"Move these mods back to active Mods directory?\n\n" if is_install_mode else f"Move these mods to Uninstalled?\n\n"
         names = "\n".join(f"  • {m['name']}" for m in sel)
-        if not messagebox.askyesno("Uninstall Mods", f"Move these mods to Uninstalled?\n\n{names}"):
+        
+        if not messagebox.askyesno(title, prompt + names):
             return
+            
         for m in sel:
             try:
-                uninstall_mod(m, self.cfg["mods_dir"])
+                if is_install_mode:
+                    reinstall_mod(m, self.cfg["mods_dir"])
+                else:
+                    uninstall_mod(m, self.cfg["mods_dir"])
             except Exception as e:
-                messagebox.showerror("JokerDeck", f"Failed to uninstall {m['name']}:\n{e}")
+                action_str = "reinstall" if is_install_mode else "uninstall"
+                messagebox.showerror("JokerDeck", f"Failed to {action_str} {m['name']}:\n{e}")
+    
         self._selected_mods.clear()
         self._refresh_mods()
-        self.status_var.set(f"Uninstalled {len(sel)} mod(s).")
+        action_done = "Installed" if is_install_mode else "Uninstalled"
+        self.status_var.set(f"{action_done} {len(sel)} mod(s).")
+        self._deselect_all()
 
     # undo / redo
     def _push_undo(self, batch: list[ToggleAction]):
@@ -709,6 +817,19 @@ class JokerDeck(tk.Tk):
         query = self._search_var.get().strip().lower()
         sort_mode = self._sort_var.get()
 
+        # uninstalled view pulls from a completely different pool, not self.mods
+        if sort_mode == "Uninstalled":
+            uninstalled = get_uninstalled_mods(self.cfg["mods_dir"])
+            filtered = []
+            for m in uninstalled:
+                m_name = str(m.get("name", "")).lower()
+                m_desc = str(m.get("description", "")).lower()
+                if query and (query not in m_name and query not in m_desc):
+                    continue
+                filtered.append(m)
+            self._finish_render(filtered, sort_mode)
+            return
+
         filtered = []
         for m in self.mods:
             m_name = str(m.get("name", "")).lower()
@@ -719,12 +840,17 @@ class JokerDeck(tk.Tk):
                 continue
             if sort_mode == "Disabled Only" and m["enabled"]:
                 continue
+            if sort_mode == "Conflicting" and str(m["path"]) not in self._conflicting_paths:
+                continue
             if sort_mode == "Only of author(s):" and self._selected_authors:
                 mod_authors = [a.strip() for a in m["author"].replace(" & ", ", ").split(", ")]
                 if not any(auth in self._selected_authors for auth in mod_authors):
                     continue
             filtered.append(m)
 
+        self._finish_render(filtered, sort_mode)
+
+    def _finish_render(self, filtered, sort_mode):
         if not filtered:
             if not self._empty_label:
                 self._empty_label = tk.Label(self.mod_frame, text="No modifications found.",
@@ -735,8 +861,12 @@ class JokerDeck(tk.Tk):
 
         if sort_mode == "Name (Z-A)":
             filtered.sort(key=lambda m: m["name"].lower(), reverse=True)
+        elif sort_mode == "Recently Toggled":
+            filtered.sort(key=lambda m: self._toggle_times.get(str(m["path"]), 0), reverse=True)
         else:
             filtered.sort(key=lambda m: m["name"].lower())
+
+        is_uninstalled_view = sort_mode == "Uninstalled"
 
         for idx, mod in enumerate(filtered):
             row_idx = idx // 2
@@ -744,11 +874,21 @@ class JokerDeck(tk.Tk):
             ui = self._get_cached_card(idx)
             ui["_mod_path"] = str(mod["path"])
 
+            is_conflicting = str(mod["path"]) in getattr(self, "_conflicting_paths", set())
             is_on = mod["enabled"]
             is_selected = str(mod["path"]) in self._selected_mods
 
-            card_bg = SEL_BG if is_selected else PANEL
-            bdr     = SEL_BDR if is_selected else BORDER
+            # conflicting cards get a yellow wash, selected cards get the red tint, otherwise normal
+            if is_selected:
+                card_bg = SEL_BG
+                bdr = SEL_BDR
+            elif is_conflicting:
+                card_bg = "#fffbe6"
+                bdr = "#e6c84a"
+            else:
+                card_bg = PANEL
+                bdr = BORDER
+
             ui["card"].configure(bg=card_bg, highlightbackground=bdr)
             ui["top"].configure(bg=card_bg)
             ui["accent"].configure(bg=ACCENT if is_on else DISABLED)
@@ -756,7 +896,6 @@ class JokerDeck(tk.Tk):
             ui["desc"].configure(text=mod["description"], bg=card_bg)
             ui["meta"].configure(bg=card_bg)
 
-            # Mod icon
             if mod.get("icon"):
                 photo = self._load_icon(mod["icon"])
                 if photo:
@@ -767,13 +906,17 @@ class JokerDeck(tk.Tk):
             else:
                 ui["icon"].configure(image="", bg=card_bg)
 
-            ui["toggle"].configure(
-                text="Active" if is_on else "Inactive",
-                fg=ENABLED if is_on else DISABLED,
-                bg=PANEL, activebackground=HOVER, activeforeground=TEXT,
-                command=lambda m=mod, i=idx: self._toggle_mod_fast(m, i)
-            )
-            ui["toggle"].pack(side="right")
+            # in uninstalled view, hide the active/inactive toggle entirely
+            if is_uninstalled_view:
+                ui["toggle"].pack_forget()
+            else:
+                ui["toggle"].configure(
+                    text="Active" if is_on else "Inactive",
+                    fg=ENABLED if is_on else DISABLED,
+                    bg=PANEL, activebackground=HOVER, activeforeground=TEXT,
+                    command=lambda m=mod, i=idx: self._toggle_mod_fast(m, i)
+                )
+                ui["toggle"].pack(side="right")
 
             def make_select_cmd(m=mod, u=ui):
                 return lambda e: self._toggle_card_selection(m, u)
@@ -796,9 +939,11 @@ class JokerDeck(tk.Tk):
 
     def _toggle_mod_fast(self, mod: dict, cache_index: int):
         try:
+            import time
             before = mod["enabled"]
             set_mod_enabled(mod, not mod["enabled"])
             is_on = mod["enabled"]
+            self._toggle_times[str(mod["path"])] = time.time()
             self._push_undo([ToggleAction(mod, before)])
 
             ui = self._card_cache[cache_index]
@@ -827,6 +972,8 @@ class JokerDeck(tk.Tk):
                     if cleaned:
                         found_authors.add(cleaned)
         self._all_authors = sorted(list(found_authors))
+        if hasattr(self, "sort_combo"):
+            self._update_sort_options()
         self._render_mods()
         self.status_var.set(f"Loaded {len(self.mods)} mod(s).")
 
@@ -834,6 +981,7 @@ class JokerDeck(tk.Tk):
     def _open_settings(self):
         win = tk.Toplevel(self)
         win.title("Settings")
+        win.geometry("1080x720")
         #win.state("zoomed")
         self.minsize(700, 500)
         win.configure(bg=PANEL)
