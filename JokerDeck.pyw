@@ -4,6 +4,7 @@ JokerDeck - a balatro mod manager
 A simple balatro mod manager made with Python!
 """
 
+# imports
 import os
 import sys
 import json
@@ -14,12 +15,13 @@ from tkinter import ttk, messagebox, filedialog
 from pathlib import Path
 from ctypes import windll, byref, create_unicode_buffer
 
-try:
+try: # so pillow is optional
     from PIL import Image, ImageTk
     PIL_AVAILABLE = True
 except ImportError:
     PIL_AVAILABLE = False
 
+# crispy text
 try:
     windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
@@ -35,6 +37,7 @@ except Exception:
     pass        
 
 def load_custom_font(font_filename: str) -> str:
+    # loads da font
     font_path = Path(__file__).parent / font_filename
     if font_path.exists() and os.name == "nt":
         windll.gdi32.AddFontResourceExW(byref(create_unicode_buffer(str(font_path))), 0x10, 0)
@@ -44,8 +47,8 @@ def load_custom_font(font_filename: str) -> str:
     return "Arial"
 
 # defaults
-DEFAULT_MODS_DIR  = r"C:\Users\covec\AppData\Roaming\Balatro\Mods"
-DEFAULT_GAME_PATH = r"C:\Users\covec\Desktop\Balatro"
+DEFAULT_MODS_DIR  = r"C:\\Users\\covec\\AppData\\Roaming\\Balatro\\Mods",
+DEFAULT_GAME_PATH = r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro"
 GAME_EXE_NAME     = "Balatro.exe"
 CONFIG_FILE       = Path(__file__).parent / "jokerdeck_config.json"
 IGNORE_FILE       = ".lovelyignore"
@@ -53,17 +56,31 @@ UNINSTALLED_DIR   = "Uninstalled"
 
 FONT_FAMILY = load_custom_font("m6x11plus.ttf")
 
-BG       = "#f2f2f7"
-PANEL    = "#ffffff"
 ACCENT   = "#cc1b3b"
-TEXT     = "#1c1c1e"
-SUBTEXT  = "#68686e"
-BORDER   = "#d1d1d6"
 ENABLED  = "#1a7f37"
 DISABLED = "#8e8e93"
-HOVER    = "#fafdff"
-SEL_BG   = "#fff0f3"
-SEL_BDR  = "#cc1b3b"
+
+LIGHT = {
+    "BG": "#f2f2f7", "PANEL": "#ffffff", "TEXT": "#1c1c1e",
+    "SUBTEXT": "#68686e", "BORDER": "#d1d1d6", "HOVER": "#fafdff",
+    "SEL_BG": "#fff0f3", "SEL_BDR": "#cc1b3b",
+}
+DARK = {
+    "BG": "#1c1c1e", "PANEL": "#2c2c2e", "TEXT": "#f2f2f7",
+    "SUBTEXT": "#98989f", "BORDER": "#3a3a3c", "HOVER": "#3a3a3c",
+    "SEL_BG": "#3a1a1f", "SEL_BDR": "#cc1b3b",
+}
+
+def apply_theme(dark: bool):
+    # wooo, dark modee
+    t = DARK if dark else LIGHT
+    global BG, PANEL, TEXT, SUBTEXT, BORDER, HOVER, SEL_BG, SEL_BDR
+    BG, PANEL, TEXT, SUBTEXT, BORDER, HOVER, SEL_BG, SEL_BDR = (
+        t["BG"], t["PANEL"], t["TEXT"], t["SUBTEXT"],
+        t["BORDER"], t["HOVER"], t["SEL_BG"], t["SEL_BDR"]
+    )
+# sorry ill have to burn your eyes just until you can make it to settings
+apply_theme(False)
 
 # config i/o
 def load_config() -> dict:
@@ -73,7 +90,7 @@ def load_config() -> dict:
                 return json.load(f)
         except Exception:
             pass
-    return {"mods_dir": DEFAULT_MODS_DIR, "game_path": DEFAULT_GAME_PATH}
+    return {"mods_dir": DEFAULT_MODS_DIR, "game_path": DEFAULT_GAME_PATH, "dark_mode": False}
 
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w") as f:
@@ -100,7 +117,7 @@ def get_mods(mods_dir: str) -> list[dict]:
     for entry in sorted(p.iterdir()):
         if not entry.is_dir():
             continue
-        # Skip folders with no valid JSON — not a real mod
+        # skip invalid jsons
         if not _has_valid_json(entry):
             continue
 
@@ -124,11 +141,12 @@ def get_mods(mods_dir: str) -> list[dict]:
 
                 if temp_name and not mod_name:
                     mod_name = temp_name
-                if temp_desc and description == "No description provided.":
+                if temp_desc and description == "No description provided.": #rip
                     description = temp_desc
                 if temp_ver and not version:
                     version = str(temp_ver)
                 if raw_author and not author:
+                    # super cool thing to list authors!
                     if isinstance(raw_author, list):
                         if len(raw_author) == 1:
                             author = str(raw_author[0])
@@ -217,7 +235,7 @@ def launch_game(game_path: str, vanilla: bool = False):
 class ToggleAction:
     def __init__(self, mod: dict, before: bool):
         self.mod = mod
-        self.before = before   # state BEFORE the action
+        self.before = before # state BEFORE the action
         self.after = not before
 
 # main app
@@ -225,6 +243,7 @@ class JokerDeck(tk.Tk):
     def __init__(self):
         super().__init__()
         self.cfg = load_config()
+        apply_theme(self.cfg.get("dark_mode", False)) # light mode
         try:
             with open(Path(__file__).parent / "conf.json", "r") as f:
                 self._version = json.load(f).get("version", "")
@@ -241,7 +260,7 @@ class JokerDeck(tk.Tk):
 
         # selection mode
         self._select_mode = False
-        self._selected_mods: set = set()   # set of mod paths (str)
+        self._selected_mods: set = set() # set of mod paths (str)
         self._action_bar = None
 
         # undo/redo stacks
@@ -269,8 +288,19 @@ class JokerDeck(tk.Tk):
         if self._search_timer:
             self.after_cancel(self._search_timer)
         self._search_timer = self.after(150, self._render_mods)
-
-    # ── ui build ────────────────────────────────────────────────────────────
+        
+    # "re" build.. haha get it? no..? oh ok
+    def _rebuild_ui(self):
+        for widget in self.winfo_children():
+            widget.destroy()
+        self._card_cache = []
+        self._empty_label = None
+        self._icon_cache = {}
+        self.configure(bg=BG)
+        self._build_ui()
+        self._refresh_mods()
+        
+    # ui build
     def _build_ui(self):
         self._style_ttk()
         self._build_header()
@@ -312,10 +342,11 @@ class JokerDeck(tk.Tk):
         bar = tk.Frame(self, bg=BG, pady=12)
         bar.pack(fill="x", padx=20)
 
+        #launcbbuttons
         self._btn(bar, "▶ Launch Modded", lambda: self._launch(vanilla=False), bg=ACCENT, fg=PANEL, font=(FONT_FAMILY, 18, "bold")).pack(side="left", padx=(0, 8))
         self._btn(bar, "Launch Vanilla",  lambda: self._launch(vanilla=True),  bg=BORDER, fg=TEXT, font=(FONT_FAMILY, 18)).pack(side="left", padx=(0, 20))
 
-        # Undo / Redo / Reload — replacing old Enable All / Disable All
+        #undo/redo stuff
         self._undo_btn = self._btn(bar, "↩", self._undo, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 20), pad=(10, 4))
         self._undo_btn.pack(side="left", padx=(0, 4))
         self._redo_btn = self._btn(bar, "↪", self._redo, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 20), pad=(10, 4))
@@ -337,7 +368,7 @@ class JokerDeck(tk.Tk):
                                         state="readonly", font=(FONT_FAMILY, 18), width=18)
         self.sort_combo.pack(side="left")
         self.sort_combo.bind("<<ComboboxSelected>>", self._on_sort_change)
-        self.author_btn = self._btn(sort_frame, "Select Authors…", self._toggle_author_popup, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18), pad=(10, 4))
+        self.author_btn = self._btn(sort_frame, "Select Authors...", self._toggle_author_popup, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18), pad=(10, 4)) # author selection
 
         self._update_undo_redo_btns()
 
@@ -455,7 +486,7 @@ class JokerDeck(tk.Tk):
         self.mod_count_var = tk.StringVar(value="")
         tk.Label(footer, textvariable=self.mod_count_var, bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 18)).pack(side="right", padx=15)
 
-    # ── select mode ─────────────────────────────────────────────────────────
+    # select mode
     def _toggle_select_mode(self):
         self._select_mode = not self._select_mode
         if self._select_mode:
@@ -550,7 +581,7 @@ class JokerDeck(tk.Tk):
         self._refresh_mods()
         self.status_var.set(f"Uninstalled {len(sel)} mod(s).")
 
-    # ── undo / redo ─────────────────────────────────────────────────────────
+    # undo / redo
     def _push_undo(self, batch: list[ToggleAction]):
         self._undo_stack.append(batch)
         self._redo_stack.clear()
@@ -583,7 +614,7 @@ class JokerDeck(tk.Tk):
             self._undo_btn.configure(fg=TEXT if self._undo_stack else DISABLED)
             self._redo_btn.configure(fg=TEXT if self._redo_stack else DISABLED)
 
-    # ── card cache & render ──────────────────────────────────────────────────
+    # card cache & render
     def _load_icon(self, icon_path: Path) -> tk.PhotoImage | None:
         key = str(icon_path)
         if key in self._icon_cache:
@@ -785,19 +816,21 @@ class JokerDeck(tk.Tk):
         self._render_mods()
         self.status_var.set(f"Loaded {len(self.mods)} mod(s).")
 
-    # ── settings ────────────────────────────────────────────────────────────
+    # settings
     def _open_settings(self):
         win = tk.Toplevel(self)
         win.title("Settings")
-        win.state("zoomed")
+        #win.state("zoomed")
         self.minsize(700, 500)
         win.configure(bg=PANEL)
         win.grab_set()
 
+        # reusable thing
         def section(label):
             tk.Label(win, text=label, bg=PANEL, fg=TEXT,
                      font=(FONT_FAMILY, 18, "bold")).pack(anchor="w", padx=20, pady=(14, 2))
 
+        # another resuable field row thingamajgi
         def path_row(parent, var: tk.StringVar, pick_fn):
             f = tk.Frame(parent, bg=PANEL)
             f.pack(fill="x", padx=20, pady=(0, 4))
@@ -805,35 +838,48 @@ class JokerDeck(tk.Tk):
                      relief="flat", font=(FONT_FAMILY, 18), bd=5).pack(side="left", fill="x", expand=True)
             JokerDeck._btn(f, "Browse", pick_fn, bg=BORDER, fg=TEXT).pack(side="left", padx=(6, 0))
 
+        # exe dir
         game_var = tk.StringVar(value=self.cfg["game_path"])
         section("Balatro Executable Directory")
         path_row(win, game_var,
-                 lambda: game_var.set(filedialog.askdirectory(title="Select Balatro Directory",
-                                                               initialdir=self.cfg["game_path"]) or game_var.get()))
+            lambda: game_var.set(filedialog.askdirectory(title="Select Balatro Directory",
+                initialdir=self.cfg["game_path"]) or game_var.get()))
 
+        # path field for mods, 
         mods_var = tk.StringVar(value=self.cfg["mods_dir"])
         section("Mods Directory Path")
         path_row(win, mods_var,
-                 lambda: mods_var.set(filedialog.askdirectory(title="Select Mods Directory",
-                                                               initialdir=self.cfg["mods_dir"]) or mods_var.get()))
-
-        btn_frame = tk.Frame(win, bg=PANEL)
+            lambda: mods_var.set(filedialog.askdirectory(title="Select Mods Directory",
+                initialdir=self.cfg["mods_dir"]) or mods_var.get()))
+                                                               
+        # so the buttons actually are visible
+        btn_frame = tk.Frame(win, bg=PANEL) 
         btn_frame.pack(side="bottom", fill="x", padx=20, pady=14)
+        
+        section("Appearance") # (fancy word, well it's nt that fnacyy but uh, typos go brr)
+        dark_var = tk.BooleanVar(value=self.cfg.get("dark_mode", False))
+        dark_frame = tk.Frame(win, bg=PANEL)
+        dark_frame.pack(fill="x", padx=20, pady=(0, 4))
+        tk.Checkbutton(dark_frame, text="Dark Mode", variable=dark_var, bg=PANEL, fg=TEXT,
+            selectcolor=PANEL, activebackground=PANEL, activeforeground=TEXT,
+            font=(FONT_FAMILY, 18), relief="flat").pack(side="left")
 
         def save():
             self.cfg["game_path"] = game_var.get().strip()
             self.cfg["mods_dir"]  = mods_var.get().strip()
+            self.cfg["dark_mode"] = dark_var.get() # save if the user is a Sith- i mean if they selected Dark mode
             save_config(self.cfg)
+            apply_theme(dark_var.get()) # actually apply it
             win.destroy()
-            self._refresh_mods()
-            self.status_var.set("Configurations saved.")
+            self._rebuild_ui()
+            self.status_var.set("Saved.")
 
-        self._btn(btn_frame, "Save Configurations", save,
+        self._btn(btn_frame, "Save", save,
                   bg=ACCENT, fg=PANEL, font=(FONT_FAMILY, 18, "bold")).pack(side="right")
         self._btn(btn_frame, "Cancel", win.destroy,
                   bg=BG, fg=SUBTEXT).pack(side="right", padx=(0, 8))
 
-    # ── canvas layout ────────────────────────────────────────────────────────
+    # canvas layout
     def _on_frame_configure(self, _event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -845,7 +891,7 @@ class JokerDeck(tk.Tk):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self.canvas.update_idletasks()
 
-    # ── widget factory ───────────────────────────────────────────────────────
+    # widget factory
     @staticmethod
     def _btn(parent, text, command, bg=PANEL, fg=TEXT, font=None, pad=(12, 6)):
         if font is None:
