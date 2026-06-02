@@ -8,6 +8,7 @@ A simple balatro mod manager made with Python!
 import os
 import sys
 import json
+import re
 import shutil
 import subprocess
 import tkinter as tk
@@ -102,7 +103,10 @@ def _has_valid_json(entry: Path) -> bool:
     for jf in entry.glob("*.json"):
         try:
             with open(jf, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                try:
+                    data = json.loads(f.read().strip().rstrip(","))
+                except Exception:
+                    continue
             if isinstance(data, dict) and data:
                 return True
         except Exception:
@@ -117,9 +121,6 @@ def get_mods(mods_dir: str) -> list[dict]:
     for entry in sorted(p.iterdir()):
         if not entry.is_dir():
             continue
-        # skip invalid jsons
-        if not _has_valid_json(entry):
-            continue
 
         ignore = entry / IGNORE_FILE
         mod_name = None
@@ -131,35 +132,48 @@ def get_mods(mods_dir: str) -> list[dict]:
         for meta_file in entry.glob("*.json"):
             try:
                 with open(meta_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                    raw = f.read()
+                    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+                    data = json.loads(raw)
+
                 if not isinstance(data, dict):
                     continue
+
                 temp_name = data.get("display_name") or data.get("name") or data.get("id")
                 temp_desc = data.get("description")
                 temp_ver  = data.get("version")
                 raw_author = data.get("author")
 
+                # name
                 if temp_name and not mod_name:
                     mod_name = temp_name
-                if temp_desc and description == "No description provided.": #rip
+
+                # description
+                if temp_desc and description == "No description provided.":
                     description = temp_desc
+
+                # version
                 if temp_ver and not version:
                     version = str(temp_ver)
+
+                # author formatting
                 if raw_author and not author:
-                    # super cool thing to list authors!
                     if isinstance(raw_author, list):
-                        if len(raw_author) == 1:
-                            author = str(raw_author[0])
-                        elif len(raw_author) == 2:
-                            author = f"{raw_author[0]} & {raw_author[1]}"
+                        cleaned = [str(a).strip() for a in raw_author if a]
+
+                        if len(cleaned) == 1:
+                            author = cleaned[0]
+                        elif len(cleaned) == 2:
+                            author = f"{cleaned[0]} & {cleaned[1]}"
                         else:
-                            author = ", ".join(map(str, raw_author[:-1])) + f" & {raw_author[-1]}"
+                            author = ", ".join(cleaned[:-1]) + f" & {cleaned[-1]}"
                     else:
                         author = str(raw_author)
 
-                # Once we have everything, stop early
-                if mod_name and description != "No description provided." and version and author:
+                # stop early only if core fields are filled
+                if mod_name and version and description != "No description provided.":
                     break
+
             except Exception:
                 pass
 
