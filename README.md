@@ -1,4 +1,4 @@
-# 🃏 JokerDeck
+![](previews/banner.png)
 ### a balatro mod manager that doesn't suck
 
 tired of digging through your `AppData` folder like a raccoon every time you want to swap mods? yeah. me too. 
