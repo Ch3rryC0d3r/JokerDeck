@@ -49,7 +49,7 @@ def load_custom_font(font_filename: str) -> str:
 
 # defaults
 DEFAULT_MODS_DIR  = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Balatro", "Mods")
-DEFAULT_GAME_PATH = r"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Balatro"
+DEFAULT_GAME_PATH = r"C:\Program Files (x86)\Steam\steamapps\common\Balatro"
 GAME_EXE_NAME     = "Balatro.exe"
 CONFIG_FILE       = Path(__file__).parent / "jokerdeck_config.json"
 IGNORE_FILE       = ".lovelyignore"
@@ -289,10 +289,9 @@ def get_uninstalled_mods(mods_dir: str) -> list[dict]:
 
 # launch helpers
 def launch_game(game_path: str, vanilla: bool = False):
-    exe = Path(game_path) / GAME_EXE_NAME
-    if not exe.exists():
-        exe = Path(game_path)
-    if not exe.exists():
+    p = Path(game_path)
+    exe = p / GAME_EXE_NAME if p.is_dir() else p
+    if not exe.exists() or exe.is_dir():
         messagebox.showerror("JokerDeck", f"Balatro.exe not found at:\n{exe}\n\nCheck Settings.")
         return
     cmd = [str(exe)]
