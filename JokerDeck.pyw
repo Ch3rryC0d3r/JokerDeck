@@ -57,6 +57,7 @@ GAME_EXE_NAME     = "Balatro.exe"
 CONFIG_FILE       = Path(__file__).parent / "jokerdeck_config.json"
 IGNORE_FILE       = ".lovelyignore"
 UNINSTALLED_DIR   = "Uninstalled"
+SMODS_VERSIONS_DIR = "Versions"
 
 FONT_FAMILY = load_custom_font("m6x11plus.ttf")
 
@@ -541,6 +542,9 @@ class JokerDeck(tk.Tk):
         populate_authors()
 
     def _build_mod_grid(self):
+        self._build_smods_bar()  # smods strip at the top :3
+        container = tk.Frame(self, bg=BG)
+
         container = tk.Frame(self, bg=BG)
         container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
         canvas_frame = tk.Frame(container, bg=BG)
@@ -739,6 +743,148 @@ class JokerDeck(tk.Tk):
             self._undo_btn.configure(fg=TEXT if self._undo_stack else DISABLED)
             self._redo_btn.configure(fg=TEXT if self._redo_stack else DISABLED)
 
+    # Smods version stuff
+    def _smods_path(self) -> Path:
+        return Path(self.cfg["mods_dir"]).parent / SMODS_VERSIONS_DIR
+
+    def _active_smods(self) -> dict | None:
+        mods_dir = Path(self.cfg["mods_dir"])
+        if not mods_dir.exists():
+            return None
+        for folder in mods_dir.iterdir():
+            if not folder.is_dir():
+                continue
+            if (folder / "version.lua").exists():
+                ver = self._read_smods_ver(folder / "version.lua")
+                if ver:
+                    return {"folder_path": str(folder), "folder_name": folder.name, "version": ver}
+        return None
+
+    def _all_smods_versions(self) -> list[dict]:
+        p = self._smods_path()
+        if not p.exists():
+            try: p.mkdir(parents=True, exist_ok=True)
+            except: pass
+            return []
+        versions, seen = [], set()
+        for folder in p.iterdir():
+            if not folder.is_dir(): continue
+            if not (folder / "version.lua").exists(): continue
+            ver = self._read_smods_ver(folder / "version.lua")
+            if ver and ver not in seen:
+                seen.add(ver)
+                versions.append({"folder_path": str(folder), "folder_name": folder.name, "version": ver})
+        return versions
+
+    @staticmethod
+    def _read_smods_ver(path: Path) -> str | None:
+        try:
+            try:
+                from luaparser import ast as luaast, astnodes
+                tree = luaast.parse(path.read_text(encoding="utf-8"))
+                for node in luaast.walk(tree):
+                    if isinstance(node, astnodes.Return) and node.values and isinstance(node.values[0], astnodes.String):
+                        raw = node.values[0].s
+                        break
+                else:
+                    return None
+            except ImportError:
+                import re
+                m = re.search(r'return\s+"([^"]+)"', path.read_text(encoding="utf-8"))
+                if not m: return None
+                raw = m.group(1)
+            # same slicing as the original — "0.X.Y-SMODS-0.1.2" → "SMODS"
+            after = raw[raw.find("-") + 1:]
+            return after[:after.find("-")] if "-" in after else after
+        except:
+            return None
+
+    def _switch_smods(self, target: dict):
+        mods_dir = Path(self.cfg["mods_dir"])
+        current = self._active_smods()
+
+        if current:
+            backup = self._smods_path() / current["folder_name"]
+            if not backup.exists():
+                try: shutil.copytree(current["folder_path"], str(backup))
+                except Exception as e:
+                    messagebox.showerror("JokerDeck", f"Couldn't back up current Smods:\n{e}"); return
+            try: shutil.rmtree(current["folder_path"])
+            except Exception as e:
+                messagebox.showerror("JokerDeck", f"Couldn't remove current Smods:\n{e}"); return
+
+        try: shutil.copytree(target["folder_path"], str(mods_dir / target["folder_name"]))
+        except Exception as e:
+            messagebox.showerror("JokerDeck", f"Couldn't install Smods {target['version']}:\n{e}"); return
+
+        self._refresh_mods()
+        self.status_var.set(f"Switched to Smods {target['version']}.")
+
+    def _build_smods_bar(self):
+        if hasattr(self, "_smods_bar") and self._smods_bar.winfo_exists():
+            self._smods_bar.destroy()
+
+        versions = self._all_smods_versions()
+        active = self._active_smods()
+        active_ver = active["version"] if active else None
+
+        # sort by the number then the letter
+        def smods_sort_key(s):
+            ver = s["version"]
+            num = ''.join(c for c in ver if c.isdigit())
+            letter = ''.join(c for c in ver if c.isalpha())
+            return (int(num) if num else 0, letter)
+        versions.sort(key=smods_sort_key) # could probably js like put it in one line, but i'd rather read it
+
+        bar = tk.Frame(self, bg=BG)
+        bar.pack(fill="x", padx=20, pady=(0, 6))
+        self._smods_bar = bar
+
+        top = tk.Frame(bar, bg=BG)
+        top.pack(fill="x", pady=(0, 4))
+        tk.Label(top, text="Smods", bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 16, "bold")).pack(side="left")
+        if active_ver:
+            tk.Label(top, text=f"  active: {active_ver}", bg=BG, fg=ENABLED, font=(FONT_FAMILY, 16)).pack(side="left")
+        if not versions:
+                # look for smods in the mods directory
+                mods_dir = Path(self.cfg["mods_dir"])
+                if mods_dir.exists():
+                    for folder in mods_dir.iterdir():
+                        if not folder.is_dir(): continue
+                        if "smods" not in folder.name.lower(): continue
+                        if not (folder / "version.lua").exists(): continue
+                        ver = self._read_smods_ver(folder / "version.lua")
+                        if ver:
+                            versions.append({"folder_path": str(folder), "folder_name": folder.name, "version": ver})
+
+        if not versions: # wtf do you wanna do with no smods 🙏
+            tk.Label(top, text=f"  no versions found in '{SMODS_VERSIONS_DIR}/'", bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 16)).pack(side="left")
+            tk.Frame(bar, bg=BORDER, height=1).pack(fill="x", pady=(0, 6))
+            return
+
+        card = tk.Frame(bar, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
+        card.pack(fill="x")
+        tk.Frame(card, bg=ENABLED if active_ver else DISABLED, height=3).pack(fill="x")
+
+        btns = tk.Frame(card, bg=PANEL)
+        btns.pack(fill="x", padx=12, pady=8)
+
+        for s in versions:
+            is_active = s["version"] == active_ver
+            btn = tk.Button(
+                btns, text=s["version"],
+                bg=ACCENT if is_active else BG,
+                fg=PANEL if is_active else TEXT,
+                activebackground=HOVER, activeforeground=TEXT,
+                font=(FONT_FAMILY, 16, "bold") if is_active else (FONT_FAMILY, 16),
+                relief="flat", bd=0, padx=14, pady=6,
+                cursor="arrow" if is_active else "hand2",
+                command=(lambda sv=s: self._switch_smods(sv)) if not is_active else lambda: None
+            )
+            btn.pack(side="left", padx=(0, 6))
+
+        tk.Frame(bar, bg=BORDER, height=1).pack(fill="x", pady=(4, 6))
+        
     # card cache & render
     def _load_icon(self, icon_path: Path) -> tk.PhotoImage | None:
         key = str(icon_path)
@@ -872,7 +1018,7 @@ class JokerDeck(tk.Tk):
         is_uninstalled_view = sort_mode == "Uninstalled"
 
         for idx, mod in enumerate(filtered):
-            row_idx = idx // 2
+            row_idx = (idx // 2) + 1
             col_idx = idx % 2
             ui = self._get_cached_card(idx)
             ui["_mod_path"] = str(mod["path"])
@@ -966,6 +1112,7 @@ class JokerDeck(tk.Tk):
         launch_game(self.cfg["game_path"], vanilla=vanilla)
 
     def _refresh_mods(self):
+
         self.mods = get_mods(self.cfg["mods_dir"])
         found_authors = set()
         for m in self.mods:
@@ -977,6 +1124,10 @@ class JokerDeck(tk.Tk):
         self._all_authors = sorted(list(found_authors))
         if hasattr(self, "sort_combo"):
             self._update_sort_options()
+
+        if hasattr(self, "_smods_bar"):
+            self._build_smods_bar()
+            
         self._render_mods()
         self.status_var.set(f"Loaded {len(self.mods)} mod(s).")
 
