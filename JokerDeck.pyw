@@ -376,7 +376,10 @@ class JokerDeck(tk.Tk):
         self._icon_cache = {}
         self.configure(bg=BG)
         self._build_ui()
-        self._refresh_mods()
+        
+        self.update_idletasks()
+        self.after(100, self._refresh_mods)
+        self.after(100, self._on_sort_change)
         
     # ui build
     def _build_ui(self):
@@ -542,7 +545,6 @@ class JokerDeck(tk.Tk):
         populate_authors()
 
     def _build_mod_grid(self):
-        self._build_smods_bar()  # smods strip at the top :3
         container = tk.Frame(self, bg=BG)
 
         container = tk.Frame(self, bg=BG)
@@ -819,25 +821,26 @@ class JokerDeck(tk.Tk):
 
         self._refresh_mods()
         self.status_var.set(f"Switched to Smods {target['version']}.")
+        # If settings is currently open, redraw the selection panel instantly
+        if hasattr(self, "_smods_panel_root") and self._smods_panel_root.winfo_exists():
+            for child in self._smods_panel_root.winfo_children():
+                child.destroy()
+            self._attach_smods_selector(self._smods_panel_root)
 
-    def _build_smods_bar(self):
-        if hasattr(self, "_smods_bar") and self._smods_bar.winfo_exists():
-            self._smods_bar.destroy()
-
+    def _attach_smods_selector(self, parent_frame):
         versions = self._all_smods_versions()
         active = self._active_smods()
         active_ver = active["version"] if active else None
 
-        # sort by the number then the letter
         def smods_sort_key(s):
             ver = s["version"]
             num = ''.join(c for c in ver if c.isdigit())
             letter = ''.join(c for c in ver if c.isalpha())
             return (int(num) if num else 0, letter)
-        versions.sort(key=smods_sort_key) # could probably js like put it in one line, but i'd rather read it
+        versions.sort(key=smods_sort_key)
 
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=20, pady=(0, 6))
+        bar = tk.Frame(parent_frame, bg=PANEL)
+        bar.pack(fill="x", pady=10)
         self._smods_bar = bar
 
         top = tk.Frame(bar, bg=BG)
@@ -1183,12 +1186,23 @@ class JokerDeck(tk.Tk):
         def save():
             self.cfg["game_path"] = game_var.get().strip()
             self.cfg["mods_dir"]  = mods_var.get().strip()
-            self.cfg["dark_mode"] = dark_var.get() # save if the user is a Sith- i mean if they selected Dark mode
+            self.cfg["dark_mode"] = dark_var.get()
             save_config(self.cfg)
-            apply_theme(dark_var.get()) # actually apply it
+            apply_theme(dark_var.get())
+            
             win.destroy()
-            self._rebuild_ui()
-            self.status_var.set("Saved.")
+            self.after(10, self._rebuild_ui)
+            self.after(20, lambda: self.status_var.set("Saved and reloaded."))
+
+        # SMODS Section Separator
+        tk.Frame(win, bg=BORDER, height=1).pack(fill="x", padx=15, pady=10)
+
+        # SMODS Container Panel
+        smods_panel = tk.Frame(win, bg=PANEL)
+        smods_panel.pack(fill="x", padx=15)
+        
+        # Build the selector onto this sub-frame directly
+        self._attach_smods_selector(smods_panel)
 
         self._btn(btn_frame, "Save", save,
                   bg=ACCENT, fg=PANEL, font=(FONT_FAMILY, 18, "bold")).pack(side="right")
