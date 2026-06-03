@@ -1241,15 +1241,19 @@ class JokerDeck(tk.Tk):
         def fetch_index_thread():
             try:
                 url = "https://raw.githubusercontent.com/Ch3rryC0d3r/JokerDeckIndex/refs/heads/main/mod.json"
+                proxy_handler = urllib.request.ProxyHandler({})
+                opener = urllib.request.build_opener(proxy_handler)
+                
                 req = urllib.request.Request(url, headers={"User-Agent": "JokerDeck-Manager"})
-                with urllib.request.urlopen(req, timeout=10) as response:
+                with opener.open(req, timeout=5) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 win.after(10, lambda: setup_browser_ui(data))
             except Exception as e:
-                win.after(10, lambda: show_error(f"failed to load index:\n{e}"))
+                err_msg = f"Connection Failed:\n\n{str(e)}\n\nCheck your internet connection, and try again."
+                win.after(10, lambda msg=err_msg: show_error(msg))
 
         def show_error(msg):
-            load_lbl.configure(text=msg, fg=ACCENT)
+            load_lbl.configure(text=f"Error\n\n{msg}", fg="#ff5555", justify="center", wraplength=600)
 
         def lazy_load_visible_icons(canvas, scroll_container):
             """Calculates which cards are on screen and kicks off background icon downloads instantly."""
@@ -1351,6 +1355,9 @@ class JokerDeck(tk.Tk):
                     target_label.configure(image=tk_img)
             except Exception:
                 pass
+
+            # uhuh why'd i make two apply icon functions??
+            # guess i'll keep both idk
 
         def apply_icon(mod_id, tk_img, target_label):
             image_cache[mod_id] = tk_img
