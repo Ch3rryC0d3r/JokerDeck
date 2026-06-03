@@ -2,18 +2,19 @@
 ### a balatro mod manager that doesn't suck
 
 tired of digging through your `AppData` folder like a raccoon every time you want to swap mods? yeah. me too. 
-JokerDeck is a simple, clean mod manager for Balatro. enable, disable, uninstall, and launch, all from one place.
+JokerDeck is a simple, clean mod manager for Balatro. (Reads your local mods, and allows you to download mods from an all-new JokerDeck index)
 
 ---
 
-## what it does
+## current features
 
-- **enable / disable mods**: one click, no file digging
-- **bulk select**: select multiple mods at once and enable, disable, or uninstall them all in one go
-- **undo / redo**: accidentally disabled everything? undo buttons got you
-- **mod icons**: automatically picks up your mod's icon so everything looks nice
-- **launch modded or vanilla**: straight from the app
-- **auto-detects mod info**: name, author, version, description, all read from the mod's own files
+- **a great (probably) mod browser**
+- **enable/disable mods with a click**
+- **bulk select (gotta love efficiency)**
+- **undo/redo**
+- **mod icons, locally and on the mod browser**
+- **launch modded or vanilla**
+- **auto-detects mod info**
 
 ---
 
