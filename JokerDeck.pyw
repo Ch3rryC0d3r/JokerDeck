@@ -181,6 +181,22 @@ def get_mods(mods_dir: str) -> list[dict]:
             except Exception:
                 pass
 
+        # Read dependency configuration arrays directly from the latest parsed valid data frame
+        m_deps = []
+        try:
+            for meta_file in entry.glob("*.json"):
+                with open(meta_file, "r", encoding="utf-8") as f:
+                    raw = f.read()
+                    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+                    data = json.loads(raw)
+                    if isinstance(data, dict) and "dependencies" in data:
+                        m_deps = data["dependencies"]
+                        if not isinstance(m_deps, list):
+                            m_deps = [str(m_deps)]
+                        break
+        except Exception:
+            pass
+
         icon_path = None
         _icon_dir = entry / "assets" / "1x"
         if _icon_dir.exists():
@@ -207,17 +223,84 @@ def get_mods(mods_dir: str) -> list[dict]:
         mods.append({
             "name":        str(mod_name).strip() if mod_name else entry.name,
             "path":        entry,
+            "id":          entry.name,
             "enabled":     not ignore.exists(),
             "description": description.strip(),
             "version":     str(version).strip(),
             "author":      str(author).strip(),
             "icon":        icon_path,
+            "dependencies": m_deps,
         })
     return mods
 
 def parse_conflict_id(conflict_str: str) -> str:
     # pull just the mod id out of something like "Talisman (>=1.1) (<<2~)"
     return conflict_str.strip().split("(")[0].strip()
+
+def normalize_mod_token(name_str: str) -> str:
+    s = name_str.strip().lower()
+    # Strip common platform-manager tags (e.g., thunderstore-lovely-0.7.1 -> lovely-0.7.1)
+    if s.startswith("thunderstore-"):
+        s = s[len("thunderstore-"):]
+    # Strip any common trailing version segments (e.g., lovely-0.7.1 -> lovely)
+    s = re.sub(r'[-_]v?\d+\.\d+.*$', '', s)
+    return s.strip()
+
+def parse_dependency_requirement(dep_str: str):
+    # Matches patterns like "Steamodded (>=1.0.0~BETA-1620a)"
+    m = re.match(r"^([^\(]+)(?:\((>=|<=|>|<|==)\s*([^\)]+)\))?", dep_str.strip())
+    if not m:
+        return normalize_mod_token(dep_str), None, None
+    
+    raw_name = m.group(1).strip()
+    clean_name = normalize_mod_token(raw_name)
+    op = m.group(2)
+    ver = m.group(3).strip() if m.group(3) else None
+    return clean_name, op, ver
+
+def compare_versions(current_ver: str, op: str, req_ver: str) -> bool:
+    # super smart helper for versions probably
+    if not op or not req_ver:
+        return True
+        
+    # if nothing, fallback
+    if not current_ver or str(current_ver).strip() in ("", "0.0.0", "unknown"):
+        return True
+
+    def parse_to_comparable_tuple(v_str):
+        v_str = str(v_str).strip()
+        # extract continous
+        segments = re.findall(r'\d+|[a-zA-Z]+', v_str)
+        processed = []
+        for seg in segments:
+            if seg.isdigit():
+                processed.append(int(seg))
+            else:
+                # keep words/letters lowercase for clean standard sorting
+                processed.append(seg.lower())
+        return tuple(processed)
+
+    c_parts = parse_to_comparable_tuple(current_ver)
+    r_parts = parse_to_comparable_tuple(req_ver)
+    
+    # pad tuples
+    max_len = max(len(c_parts), len(r_parts))
+    c_padded = c_parts + (0,) * (max_len - len(c_parts))
+    r_padded = r_parts + (0,) * (max_len - len(r_parts))
+
+    try:
+        if op == "==": return c_padded == r_padded
+        if op == ">=": return c_padded >= r_padded
+        if op == "<=": return c_padded <= r_padded
+        if op == ">":  return c_padded > r_padded
+        if op == "<":  return c_padded < r_padded
+    except Exception:
+        if op == "==": return str(current_ver) == str(req_ver)
+        if op == ">=": return str(current_ver) >= str(req_ver)
+        if op == "<=": return str(current_ver) <= str(req_ver)
+        if op == ">":  return str(current_ver) > str(req_ver)
+        if op == "<":  return str(current_ver) < str(req_ver)
+    return True
 
 def find_conflicts(mods: list[dict]) -> set[str]:
     # returns paths of any mod that is in a conflict pair with another installed mod
@@ -1020,6 +1103,28 @@ class JokerDeck(tk.Tk):
 
         is_uninstalled_view = sort_mode == "Uninstalled"
 
+        # Map all active mod instances by any identifiable token signature (normalized keys)
+        active_registry = {}
+        for m in self.mods:
+            if not m["enabled"]:
+                continue
+            
+            # Extract everything we can match on
+            tokens = set()
+            if m.get("id"): tokens.add(normalize_mod_token(str(m["id"])))
+            if m.get("display_name"): tokens.add(normalize_mod_token(str(m["display_name"])))
+            if m.get("name"): tokens.add(normalize_mod_token(str(m["name"])))
+            if m.get("path"): tokens.add(normalize_mod_token(m["path"].name))
+
+            v_str = str(m.get("version", "")).strip()
+            if not v_str or v_str.lower() in ("unknown", "0.0.0"):
+                # extract sequenece
+                path_digits = re.search(r'\d+\.\d+\S*', m["path"].name)
+                v_str = path_digits.group(0) if path_digits else "1.0.0" # idk why you wouldnt have a `version` key but just in case
+                
+            for token in tokens:
+                active_registry[token] = v_str
+
         for idx, mod in enumerate(filtered):
             row_idx = (idx // 2) + 1
             col_idx = idx % 2
@@ -1030,7 +1135,57 @@ class JokerDeck(tk.Tk):
             is_on = mod["enabled"]
             is_selected = str(mod["path"]) in self._selected_mods
 
-            # conflicting cards get a yellow wash, selected cards get the red tint, otherwise normal
+            # Evaluate dependency validity using normalized tokens
+            missing_deps = []
+            for dep in mod.get("dependencies", []):
+                dep_name, op, req_version = parse_dependency_requirement(dep)
+                
+                # bypass structural system conditions like "Balatro"
+                if dep_name == "balatro":
+                    continue
+                
+                if dep_name not in active_registry:
+                    missing_deps.append(dep)
+                elif op and req_version:
+                    current_installed_version = active_registry[dep_name]
+                    if not compare_versions(current_installed_version, op, req_version):
+                        missing_deps.append(f"{dep} (Found v{current_installed_version})")
+
+            # Trigger emergency warning card if the mod is active but missing requirements
+            if is_on and missing_deps:
+                card_bg = "#441111"
+                bdr = "#ff3333"
+                ui["card"].configure(bg=card_bg, highlightbackground=bdr, highlightthickness=2)
+                ui["top"].configure(bg=card_bg)
+                ui["accent"].configure(bg="#ff3333")
+                ui["name"].configure(text=mod["name"], bg=card_bg, fg="#ff5555")
+                
+                # Format an alert explaining what is missing directly within the description slot
+                dep_list_str = ", ".join(missing_deps)
+                ui["desc"].configure(text=f"CRITICAL ERROR: Missing required dependencies:\n -> [ {dep_list_str} ]", bg=card_bg, fg="#ffaaaa")
+                ui["meta"].configure(bg=card_bg, fg="#ff8888")
+                ui["icon"].configure(bg=card_bg)
+                
+                # Update the button to serve as a fast emergency disable toggle switch
+                ui["toggle"].configure(
+                    text="Disable Mod", fg="#ff8888", bg="#220505", 
+                    activebackground="#3a1111", activeforeground="#ffaaaa",
+                    command=lambda m=mod, i=idx: [set_mod_enabled(m, False), self._refresh_mods()]
+                )
+                ui["toggle"].pack(side="right")
+                
+                def make_select_cmd(m=mod, u=ui):
+                    return lambda e: self._toggle_card_selection(m, u)
+                ui["select_btn"].bind("<Button-1>", make_select_cmd())
+                
+                meta_str = f"v{mod.get('version', '')} by {mod.get('author', 'unknown')}"
+                ui["meta"].configure(text=meta_str)
+                ui["meta"].pack(fill="x", padx=12, pady=(0, 4))
+                
+                ui["card"].grid(row=row_idx, column=col_idx, padx=8, pady=8, sticky="nsew")
+                continue
+
+            # Fall back to native appearance handling if safe
             if is_selected:
                 card_bg = SEL_BG
                 bdr = SEL_BDR
@@ -1041,12 +1196,12 @@ class JokerDeck(tk.Tk):
                 card_bg = PANEL
                 bdr = BORDER
 
-            ui["card"].configure(bg=card_bg, highlightbackground=bdr)
+            ui["card"].configure(bg=card_bg, highlightbackground=bdr, highlightthickness=1)
             ui["top"].configure(bg=card_bg)
             ui["accent"].configure(bg=ACCENT if is_on else DISABLED)
-            ui["name"].configure(text=mod["name"], bg=card_bg)
-            ui["desc"].configure(text=mod["description"], bg=card_bg)
-            ui["meta"].configure(bg=card_bg)
+            ui["name"].configure(text=mod["name"], bg=card_bg, fg=TEXT) # Reset fg in case card was recycled
+            ui["desc"].configure(text=mod["description"], bg=card_bg, fg=TEXT) # Reset fg
+            ui["meta"].configure(bg=card_bg, fg=SUBTEXT) # Reset fg
 
             if mod.get("icon"):
                 photo = self._load_icon(mod["icon"])
@@ -1115,7 +1270,6 @@ class JokerDeck(tk.Tk):
         launch_game(self.cfg["game_path"], vanilla=vanilla)
 
     def _refresh_mods(self):
-
         self.mods = get_mods(self.cfg["mods_dir"])
         found_authors = set()
         for m in self.mods:
@@ -1368,8 +1522,74 @@ class JokerDeck(tk.Tk):
             load_frame.pack_forget()
             main_frame.pack(fill="both", expand=True, padx=15, pady=15)
 
-            # title
-            tk.Label(main_frame, text="available mods", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 24, "bold"), anchor="w").pack(fill="x", pady=(0, 10))
+            # cross ref local dir
+            local_status = {}
+            target_dir = self.cfg.get("mods_dir", "")
+            if target_dir and os.path.isdir(target_dir):
+                for folder in os.listdir(target_dir):
+                    f_path = os.path.join(target_dir, folder)
+                    if os.path.isdir(f_path):
+                        is_disabled = os.path.exists(os.path.join(f_path, IGNORE_FILE))
+                        v_str = "0.0.0"
+                        
+                        # track ALL keys this specific folder satisfies (folder name + internal JSON IDs)
+                        satisfied_keys = {folder, folder.lower()}
+                        if folder.lower().endswith("-main"):
+                            satisfied_keys.add(folder[:-5])
+                            satisfied_keys.add(folder[:-5].lower())
+                        if folder.lower().endswith("-master"):
+                            satisfied_keys.add(folder[:-7])
+                            satisfied_keys.add(folder[:-7].lower())
+
+                        # Try to read mod.json first
+                        m_j = os.path.join(f_path, "mod.json")
+                        if os.path.exists(m_j):
+                            try:
+                                with open(m_j, "r", encoding="utf-8") as f:
+                                    jd = json.load(f)
+                                    if isinstance(jd, list) and len(jd) > 0: jd = jd[0]
+                                    if isinstance(jd, dict):
+                                        v_str = jd.get("version", "0.0.0")
+                                        if jd.get("id"):
+                                            satisfied_keys.add(str(jd["id"]))
+                                            satisfied_keys.add(str(jd["id"]).lower())
+                                        if jd.get("name"):
+                                            satisfied_keys.add(str(jd["name"]))
+                                            satisfied_keys.add(str(jd["name"]).lower())
+                            except Exception: pass
+                        else:
+                            # scan loose layout jsons to harvest id signatures
+                            for loose_json in Path(f_path).glob("*.json"):
+                                try:
+                                    with open(loose_json, "r", encoding="utf-8") as lf:
+                                        ld = json.load(lf)
+                                        if isinstance(ld, dict):
+                                            if "version" in ld:
+                                                v_str = str(ld["version"])
+                                            if ld.get("id"):
+                                                satisfied_keys.add(str(ld["id"]))
+                                                satisfied_keys.add(str(ld["id"]).lower())
+                                            if ld.get("name"):
+                                                satisfied_keys.add(str(ld["name"]))
+                                                satisfied_keys.add(str(ld["name"]).lower())
+                                            break
+                                except Exception: pass
+                        
+                        # registry thing
+                        status_payload = {"enabled": not is_disabled, "version": v_str, "actual_folder": folder}
+                        for k in satisfied_keys:
+                            local_status[k] = status_payload
+
+            top_bar = tk.Frame(main_frame, bg=BG)
+            top_bar.pack(fill="x", pady=(0, 10))
+            tk.Label(top_bar, text="available mods", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 24, "bold"), anchor="w").pack(side="left")
+
+            # Flat search frame controller layout insertion
+            search_frm = tk.Frame(main_frame, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
+            search_frm.pack(fill="x", pady=(0, 12))
+            tk.Label(search_frm, text=" 🔍 ", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=(8, 2), pady=6)
+            search_box = tk.Entry(search_frm, bg=PANEL, fg=TEXT, insertbackground=TEXT, font=(FONT_FAMILY, 16), bd=0, highlightthickness=0)
+            search_box.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
 
             # scrollable window setup
             canvas = tk.Canvas(main_frame, bg=BG, bd=0, highlightthickness=0)
@@ -1385,20 +1605,30 @@ class JokerDeck(tk.Tk):
                 canvas.itemconfig(1, width=e.width)
             canvas.bind("<Configure>", check_width)
             
-            # Update scroll region bounding frames and run lazy loader updates immediately on viewport config adjustments
             scroll_container.bind("<Configure>", lambda _: [
                 canvas.configure(scrollregion=canvas.bbox("all")),
                 win.after(100, lambda: lazy_load_visible_icons(canvas, scroll_container))
             ])
 
-            # Hook the lazy icon display calculator straight into your scrolling behavior loops
             canvas.configure(yscrollcommand=lambda *args: [
                 scrollbar.set(*args), 
                 lazy_load_visible_icons(canvas, scroll_container)
             ])
 
+            # Process keyboard event inputs against text metrics seamlessly
+            def execute_live_search(evt=None):
+                q = search_box.get().lower().strip()
+                for item in card_widgets:
+                    if q in item["name"].lower() or q in item["description"].lower():
+                        item["frame"].pack(fill="x", pady=4, padx=2)
+                    else:
+                        item["frame"].pack_forget()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            search_box.bind("<KeyRelease>", execute_live_search)
+
             # load data cards
             for m in mod_list:
+                m_id = m.get("id", "unknown")
                 card = tk.Frame(scroll_container, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
                 card.pack(fill="x", pady=4, padx=2)
                 tk.Frame(card, bg=DISABLED, height=3).pack(fill="x")
@@ -1406,28 +1636,60 @@ class JokerDeck(tk.Tk):
                 top = tk.Frame(card, bg=PANEL)
                 top.pack(fill="x", padx=12, pady=(8, 2))
 
-                # Inject the icon label container right next to the title text component frame element
                 icon_lbl = tk.Label(top, bg=PANEL, image=placeholder_img)
                 icon_lbl.pack(side="left", padx=(0, 8))
 
                 tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
                 tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=4)
 
-                # Download Button
-                btn = self._btn(top, "Download", lambda mod=m: start_download(mod), bg=BG, fg=TEXT, font=(FONT_FAMILY, 14))
-                btn.pack(side="right", padx=(4, 0))
+                # Determine actionable rendering routes checking combinations of strict & lower tokens
+                lookups = [m_id, m_id.lower(), m.get("name", ""), m.get("name", "").lower()]
+                installed_locally = False
+                matched_key = None
+                
+                for l_key in lookups:
+                    if l_key in local_status:
+                        installed_locally = True
+                        matched_key = l_key
+                        break
 
-                # Repo Button (Opens the GitHub link in the user's browser)
+                rem_v = m.get("version", "0.0.0")
+                loc_v = local_status[matched_key]["version"] if installed_locally else "0.0.0"
+                active_locally = local_status[matched_key]["enabled"] if installed_locally else False
+                resolved_folder = local_status[matched_key]["actual_folder"] if installed_locally else m_id
+
+                if not installed_locally:
+                    btn = self._btn(top, "Download", lambda mod=m: start_download(mod), bg=BG, fg=TEXT, font=(FONT_FAMILY, 14))
+                    btn.pack(side="right", padx=(4, 0))
+                elif loc_v != rem_v:
+                    btn = self._btn(top, f"Update (v{rem_v})", lambda mod=m: start_download(mod), bg="#1e4620", fg="#a2ffa4", font=(FONT_FAMILY, 14))
+                    btn.pack(side="right", padx=(4, 0))
+                else:
+                    lbl_inst = tk.Label(top, text=f"Installed (v{loc_v})", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14))
+                    lbl_inst.pack(side="right", padx=(6, 0))
+
+                    ref_arr = [None]
+                    def trigger_browse_toggle(mod_target_folder=resolved_folder, b_widget=ref_arr):
+                        f_dir = os.path.join(self.cfg["mods_dir"], mod_target_folder)
+                        ign_file = os.path.join(f_dir, IGNORE_FILE)
+                        if os.path.exists(ign_file):
+                            try: os.unlink(ign_file)
+                            except Exception: pass
+                            b_widget[0].configure(text="Active", fg=ENABLED)
+                        else:
+                            try: Path(ign_file).touch()
+                            except Exception: pass
+                            b_widget[0].configure(text="Inactive", fg=DISABLED)
+                        self._refresh_mods()
+
+                    init_txt = "Active" if active_locally else "Inactive"
+                    init_fg = ENABLED if active_locally else DISABLED
+                    ref_arr[0] = self._btn(top, init_txt, trigger_browse_toggle, bg=BG, fg=init_fg, font=(FONT_FAMILY, 14))
+                    ref_arr[0].pack(side="right", padx=(4, 0))
+
                 import webbrowser
                 repo_url = m.get("git_url", "")
-                repo_btn = self._btn(
-                    top, 
-                    "Repo", 
-                    lambda url=repo_url: webbrowser.open(url) if url else None, 
-                    bg=PANEL, 
-                    fg=SUBTEXT, 
-                    font=(FONT_FAMILY, 14)
-                )
+                repo_btn = self._btn(top, "Repo", lambda url=repo_url: webbrowser.open(url) if url else None, bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14))
                 repo_btn.pack(side="right", padx=4)
 
                 mid = tk.Frame(card, bg=PANEL)
@@ -1437,15 +1699,15 @@ class JokerDeck(tk.Tk):
                 desc = tk.Label(card, text=m.get("description", ""), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 16), justify="left", anchor="w", wraplength=650)
                 desc.pack(fill="x", padx=12, pady=(2, 10))
 
-                # Append metadata references to tracking arrays for execution management tracking hooks
                 card_widgets.append({
-                    "id": m.get("id", "unknown"),
+                    "id": m_id,
+                    "name": m.get("name", "unknown"),
+                    "description": m.get("description", ""),
                     "git_url": m.get("git_url", ""),
                     "frame": card,
                     "icon_label": icon_lbl
                 })
 
-            # Instantly load the first batch of visible ones on screen without delay
             win.after(10, lambda: lazy_load_visible_icons(canvas, scroll_container))
             win.after(100, lambda: lazy_load_visible_icons(canvas, scroll_container))
 
@@ -1523,6 +1785,13 @@ class JokerDeck(tk.Tk):
 
                 ignore_flag = final_folder_destination / IGNORE_FILE
                 ignore_flag.touch()
+
+                # do smart manifest things idk
+                try:
+                    with open(final_folder_destination / "mod.json", "w", encoding="utf-8") as local_json:
+                        json.dump(mod, local_json, indent=2)
+                except Exception:
+                    pass
 
                 win.after(10, lambda: download_success(mod))
 
