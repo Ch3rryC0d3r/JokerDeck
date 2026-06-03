@@ -472,12 +472,32 @@ class JokerDeck(tk.Tk):
         self._build_mod_grid()
         self._build_footer()
         self._bind_shortcuts()
+        self.bind("<Button-1>", lambda e: self.focus_set() if e.widget == self or isinstance(e.widget, tk.Frame) else None)
 
     def _bind_shortcuts(self):
         self.bind_all("<Control-z>", lambda e: self._undo())
         self.bind_all("<Control-y>", lambda e: self._redo())
-        self.bind_all("<Control-a>", lambda e: self._select_all())
-        self.bind_all("<Escape>",    lambda e: self._deselect_all())
+        self.bind_all("<Control-a>", self._handle_control_a)
+        self.bind_all("<Escape>", self._handle_escape)
+
+    def _handle_control_a(self, event):
+        focused_widget = self.focus_get()
+        if isinstance(focused_widget, tk.Entry) or isinstance(focused_widget, ttk.Entry):
+            return # Allow default 'Select All Text' within the text inputs
+            
+        # ensure we aren't accidentally firing inside a modal popup window
+        if focused_widget and focused_widget.winfo_toplevel() != self:
+            return
+
+        self._select_all()
+
+    def _handle_escape(self, event):
+        focused_widget = self.focus_get()
+        if focused_widget == getattr(self, "search_entry", None):
+            self.focus_set()
+            return
+        if focused_widget and focused_widget.winfo_toplevel() == self:
+            self._deselect_all()
 
     def _style_ttk(self):
         s = ttk.Style(self)
@@ -529,7 +549,8 @@ class JokerDeck(tk.Tk):
         search_frame = tk.Frame(bar, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
         search_frame.pack(side="right")
         tk.Label(search_frame, text="  🔍 ", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 18)).pack(side="left")
-        tk.Entry(search_frame, textvariable=self._search_var, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT_FAMILY, 18), width=14, bd=4).pack(side="left", padx=(0, 2))
+        self.search_entry = tk.Entry(search_frame, textvariable=self._search_var, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT_FAMILY, 18), width=14, bd=4)
+        self.search_entry.pack(side="left", padx=(0, 2))
 
         # Sort
         sort_frame = tk.Frame(bar, bg=BG)
@@ -539,7 +560,7 @@ class JokerDeck(tk.Tk):
                                         state="readonly", font=(FONT_FAMILY, 18), width=18)
         self.sort_combo.pack(side="left")
         self.sort_combo.bind("<<ComboboxSelected>>", self._on_sort_change)
-        self.author_btn = self._btn(sort_frame, "Select Authors...", self._toggle_author_popup, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18), pad=(10, 4)) # author selection
+        self.author_btn = self._btn(sort_frame, "Select Authors...", self._toggle_author_popup, bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18), pad=(10, 4)) # author selectionz
 
         self._update_sort_options()
         self._update_undo_redo_btns()
@@ -1044,6 +1065,8 @@ class JokerDeck(tk.Tk):
         return self._card_cache[index]
 
     def _render_mods(self):
+        self.canvas.yview_moveto(0)
+
         for cache_item in self._card_cache:
             cache_item["card"].grid_forget()
         if self._empty_label:
@@ -1433,7 +1456,6 @@ class JokerDeck(tk.Tk):
                 card_y = card_frame.winfo_y()
                 card_h = card_frame.winfo_height()
                 
-                # Check if card is visible or right below the fold (buffer for smooth scrolling)
                 if (card_y + card_h >= scroll_top_pixel - 100) and (card_y <= scroll_bottom_pixel + 300):
                     downloading_icons.add(mod_id)
                     t = threading.Thread(
@@ -1446,45 +1468,58 @@ class JokerDeck(tk.Tk):
 
         def fetch_single_icon_thread(repo_url, mod_id, target_label):
             try:
-                clean_url = repo_url.replace("https://github.com/", "").strip("/")
-                parts = clean_url.split("/")
-                if len(parts) < 2:
-                    return
-                owner, repo = parts[0], parts[1]
-                
                 img_data = None
                 chosen_branch = None
                 chosen_file = None
 
-                # Query the official API endpoint to get a guaranteed directory file list
-                for br in ["master", "main"]:
-                    dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
-                    try:
-                        req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
-                        with urllib.request.urlopen(req, timeout=2) as resp:
-                            items = json.loads(resp.read().decode("utf-8"))
-                            
-                            # Safely extract names from the standard API list format
-                            png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
-                            
-                            if png_files:
-                                # Run your exact local prioritization sorting method
-                                sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
-                                chosen_file = sorted_pngs[0]
-                                chosen_branch = br
-                                break
-                    except Exception:
-                        continue
+                # non github platforms
+                if "github.com" not in repo_url.lower():
+                    for br in ["main", "master"]:
+                        for fallback_name in ["Icon.png", "icon.png", "Icon-1x.png", "icon-1x.png", "HangedMan_modicon.png"]:
+                            try:
+                                raw_url = f"{repo_url.rstrip('/')}/raw/branch/{br}/assets/1x/{fallback_name}"
+                                req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
+                                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                                    img_data = resp.read()
+                                    if img_data:
+                                        break
+                            except Exception:
+                                continue
+                        if img_data:
+                            break
 
-                # Download file utilizing the discovered filename
-                if chosen_file:
-                    raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/refs/heads/{chosen_branch}/assets/1x/{chosen_file}"
-                    try:
-                        req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
-                        with urllib.request.urlopen(req, timeout=1.5) as resp:
-                            img_data = resp.read()
-                    except Exception:
-                        pass
+                # github scraper
+                else:
+                    clean_url = repo_url.replace("https://github.com/", "").strip("/")
+                    parts = clean_url.split("/")
+                    if len(parts) < 2:
+                        return
+                    owner, repo = parts[0], parts[1]
+                    
+                    for br in ["main", "master"]:
+                        dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
+                        try:
+                            req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
+                            with urllib.request.urlopen(req, timeout=2) as resp:
+                                items = json.loads(resp.read().decode("utf-8"))
+                                png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
+                                
+                                if png_files:
+                                    sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
+                                    chosen_file = sorted_pngs[0]
+                                    chosen_branch = br
+                                    break
+                        except Exception:
+                            continue
+
+                    if chosen_file:
+                        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{chosen_branch}/assets/1x/{chosen_file}"
+                        try:
+                            req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
+                            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                                img_data = resp.read()
+                        except Exception:
+                            pass
 
                 if img_data:
                     from io import BytesIO
@@ -1492,8 +1527,13 @@ class JokerDeck(tk.Tk):
                     
                     im = Image.open(BytesIO(img_data)).convert("RGBA")
                     w, h = im.size
+                    
                     if w == h and 16 < w < 48:
                         im = im.resize((32, 32), Image.Resampling.NEAREST)
+                        tk_img = ImageTk.PhotoImage(im)
+                        win.after(5, lambda: apply_icon(mod_id, tk_img, target_label))
+                    else:
+                        im = im.resize((32, 32), Image.Resampling.LANCZOS)
                         tk_img = ImageTk.PhotoImage(im)
                         win.after(5, lambda: apply_icon(mod_id, tk_img, target_label))
             except Exception:
@@ -1510,19 +1550,10 @@ class JokerDeck(tk.Tk):
             except Exception:
                 pass
 
-            # uhuh why'd i make two apply icon functions??
-            # guess i'll keep both idk
-
-        def apply_icon(mod_id, tk_img, target_label):
-            image_cache[mod_id] = tk_img
-            if target_label.winfo_exists():
-                target_label.configure(image=tk_img)
-
         def setup_browser_ui(mod_list):
             load_frame.pack_forget()
             main_frame.pack(fill="both", expand=True, padx=15, pady=15)
 
-            # cross ref local dir
             local_status = {}
             target_dir = self.cfg.get("mods_dir", "")
             if target_dir and os.path.isdir(target_dir):
@@ -1532,16 +1563,12 @@ class JokerDeck(tk.Tk):
                         is_disabled = os.path.exists(os.path.join(f_path, IGNORE_FILE))
                         v_str = "0.0.0"
                         
-                        # track ALL keys this specific folder satisfies (folder name + internal JSON IDs)
-                        satisfied_keys = {folder, folder.lower()}
+                        satisfied_keys = {folder.strip().lower()}
                         if folder.lower().endswith("-main"):
-                            satisfied_keys.add(folder[:-5])
-                            satisfied_keys.add(folder[:-5].lower())
+                            satisfied_keys.add(folder[:-5].strip().lower())
                         if folder.lower().endswith("-master"):
-                            satisfied_keys.add(folder[:-7])
-                            satisfied_keys.add(folder[:-7].lower())
+                            satisfied_keys.add(folder[:-7].strip().lower())
 
-                        # Try to read mod.json first
                         m_j = os.path.join(f_path, "mod.json")
                         if os.path.exists(m_j):
                             try:
@@ -1551,14 +1578,11 @@ class JokerDeck(tk.Tk):
                                     if isinstance(jd, dict):
                                         v_str = jd.get("version", "0.0.0")
                                         if jd.get("id"):
-                                            satisfied_keys.add(str(jd["id"]))
-                                            satisfied_keys.add(str(jd["id"]).lower())
+                                            satisfied_keys.add(str(jd["id"]).strip().lower())
                                         if jd.get("name"):
-                                            satisfied_keys.add(str(jd["name"]))
-                                            satisfied_keys.add(str(jd["name"]).lower())
+                                            satisfied_keys.add(str(jd["name"]).strip().lower())
                             except Exception: pass
                         else:
-                            # scan loose layout jsons to harvest id signatures
                             for loose_json in Path(f_path).glob("*.json"):
                                 try:
                                     with open(loose_json, "r", encoding="utf-8") as lf:
@@ -1567,15 +1591,12 @@ class JokerDeck(tk.Tk):
                                             if "version" in ld:
                                                 v_str = str(ld["version"])
                                             if ld.get("id"):
-                                                satisfied_keys.add(str(ld["id"]))
-                                                satisfied_keys.add(str(ld["id"]).lower())
+                                                satisfied_keys.add(str(ld["id"]).strip().lower())
                                             if ld.get("name"):
-                                                satisfied_keys.add(str(ld["name"]))
-                                                satisfied_keys.add(str(ld["name"]).lower())
+                                                satisfied_keys.add(str(ld["name"]).strip().lower())
                                             break
                                 except Exception: pass
                         
-                        # registry thing
                         status_payload = {"enabled": not is_disabled, "version": v_str, "actual_folder": folder}
                         for k in satisfied_keys:
                             local_status[k] = status_payload
@@ -1584,14 +1605,12 @@ class JokerDeck(tk.Tk):
             top_bar.pack(fill="x", pady=(0, 10))
             tk.Label(top_bar, text="available mods", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 24, "bold"), anchor="w").pack(side="left")
 
-            # Flat search frame controller layout insertion
             search_frm = tk.Frame(main_frame, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
             search_frm.pack(fill="x", pady=(0, 12))
             tk.Label(search_frm, text=" 🔍 ", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=(8, 2), pady=6)
             search_box = tk.Entry(search_frm, bg=PANEL, fg=TEXT, insertbackground=TEXT, font=(FONT_FAMILY, 16), bd=0, highlightthickness=0)
             search_box.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
 
-            # scrollable window setup
             canvas = tk.Canvas(main_frame, bg=BG, bd=0, highlightthickness=0)
             scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
             canvas.configure(yscrollcommand=scrollbar.set)
@@ -1615,7 +1634,28 @@ class JokerDeck(tk.Tk):
                 lazy_load_visible_icons(canvas, scroll_container)
             ])
 
-            # Process keyboard event inputs against text metrics seamlessly
+            def _on_mouse_wheel(event):
+                # futureproofing for other platforms
+
+                if event.delta: # windows + macos
+                    canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                # linux
+                elif event.num == 4: 
+                    canvas.yview_scroll(-1, "units")
+                elif event.num == 5: 
+                    canvas.yview_scroll(1, "units")
+                lazy_load_visible_icons(canvas, scroll_container)
+
+            canvas.bind_all("<MouseWheel>", _on_mouse_wheel)
+            canvas.bind_all("<Button-4>", _on_mouse_wheel)
+            canvas.bind_all("<Button-5>", _on_mouse_wheel)
+
+            win.bind("<Destroy>", lambda _: [
+                canvas.unbind_all("<MouseWheel>"),
+                canvas.unbind_all("<Button-4>"),
+                canvas.unbind_all("<Button-5>")
+            ])
+
             def execute_live_search(evt=None):
                 q = search_box.get().lower().strip()
                 for item in card_widgets:
@@ -1642,8 +1682,11 @@ class JokerDeck(tk.Tk):
                 tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
                 tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=4)
 
-                # Determine actionable rendering routes checking combinations of strict & lower tokens
-                lookups = [m_id, m_id.lower(), m.get("name", ""), m.get("name", "").lower()]
+                # normalize registry
+                lookups = [
+                    str(m_id).strip().lower(), 
+                    str(m.get("name", "")).strip().lower()
+                ]
                 installed_locally = False
                 matched_key = None
                 
@@ -1731,10 +1774,36 @@ class JokerDeck(tk.Tk):
                 if not repo_url:
                     raise Exception("missing github repository url field")
                 
-                zip_url = repo_url.rstrip("/") + "/archive/refs/heads/master.zip"
                 target_dir = Path(self.cfg["mods_dir"])
                 target_dir.mkdir(parents=True, exist_ok=True)
                 tmp_zip = target_dir / f"temp_jokerdeck_{mod['id']}.zip"
+                
+                zip_url = None
+                
+                if "github.com" in repo_url.lower():
+                    try:
+                        clean_url = repo_url.replace("https://github.com/", "").strip("/")
+                        parts = clean_url.split("/")
+                        if len(parts) >= 2:
+                            owner, repo = parts[0], parts[1]
+                            api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
+                            
+                            req = urllib.request.Request(api_url, headers={"User-Agent": "JokerDeck-Manager"})
+                            with urllib.request.urlopen(req, timeout=3) as resp:
+                                release_info = json.loads(resp.read().decode("utf-8"))
+                                assets = release_info.get("assets", [])
+                                zip_assets = [a["browser_download_url"] for a in assets if a.get("name", "").lower().endswith(".zip")]
+                                
+                                if zip_assets:
+                                    zip_url = zip_assets[0]
+                    except Exception:
+                        pass
+
+                if not zip_url:
+                    if "github.com" not in repo_url.lower():
+                        zip_url = repo_url.rstrip("/") + "/archive/main.zip"
+                    else:
+                        zip_url = repo_url.rstrip("/") + "/archive/refs/heads/main.zip"
 
                 def run_chunk_download(url_target):
                     req = urllib.request.Request(url_target, headers={"User-Agent": "JokerDeck-Manager"})
@@ -1758,7 +1827,6 @@ class JokerDeck(tk.Tk):
                     else:
                         raise e
 
-                # extraction step
                 win.after(10, lambda: load_lbl.configure(text=f"extracting {mod['name']}...\nplease wait..."))
                 final_folder_destination = target_dir / mod["id"]
                 if final_folder_destination.exists():
@@ -1807,16 +1875,14 @@ class JokerDeck(tk.Tk):
         threading.Thread(target=fetch_index_thread, daemon=True).start()
 
     # canvas layout
-    def _on_frame_configure(self, _event=None):
+    def _on_frame_configure(self, event=None):
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _on_canvas_configure(self, event):
-        if event.width > 10:
-            self.canvas.itemconfig(self.canvas_window, width=event.width)
+        self.canvas.itemconfig(self.canvas_window, width=event.width)
 
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-        self.canvas.update_idletasks()
 
     # widget factory
     @staticmethod
