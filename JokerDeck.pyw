@@ -147,6 +147,7 @@ def get_mods(mods_dir: str) -> list[dict]:
                 temp_desc = data.get("description")
                 temp_ver  = data.get("version")
                 raw_author = data.get("author")
+                internal_id = data.get("id")
 
                 # name
                 if temp_name and not mod_name:
@@ -223,7 +224,8 @@ def get_mods(mods_dir: str) -> list[dict]:
         mods.append({
             "name":        str(mod_name).strip() if mod_name else entry.name,
             "path":        entry,
-            "id":          entry.name,
+            "id":          entry.name, 
+            "manifest_id": internal_id if internal_id else entry.name,
             "enabled":     not ignore.exists(),
             "description": description.strip(),
             "version":     str(version).strip(),
@@ -242,6 +244,10 @@ def normalize_mod_token(name_str: str) -> str:
     # Strip common platform-manager tags (e.g., thunderstore-lovely-0.7.1 -> lovely-0.7.1)
     if s.startswith("thunderstore-"):
         s = s[len("thunderstore-"):]
+    
+    # Strip common GitHub branch download suffixes
+    s = re.sub(r'-(?:main|master)$', '', s)
+    
     # Strip any common trailing version segments (e.g., lovely-0.7.1 -> lovely)
     s = re.sub(r'[-_]v?\d+\.\d+.*$', '', s)
     return s.strip()
@@ -374,6 +380,64 @@ def get_uninstalled_mods(mods_dir: str) -> list[dict]:
                     break
     return found
 
+def get_missing_dependency_status(mod: dict, all_mods: list[dict]) -> tuple[list[str], list[dict]]:
+    # gets missing deps, pretty self-explanatoryr
+    missing_strings = []
+    fixable_mods = []
+    
+    if not mod.get("dependencies"): # fallback, if it doesn't have any deps
+        return missing_strings, fixable_mods
+
+    # index
+    enabled_map = {}
+    all_local_map = {}
+    
+    for m in all_mods:
+        m_id = normalize_mod_token(m.get("manifest_id", ""))
+        f_id = normalize_mod_token(m.get("id", ""))
+        
+        all_local_map[m_id] = m
+        all_local_map[f_id] = m
+        if m.get("enabled"):
+            enabled_map[m_id] = m
+            enabled_map[f_id] = m
+
+    if hasattr(mod, "__self__") and hasattr(mod["__self__"], "cfg"):
+        app = mod["__self__"]
+    else:
+        # Fallback tracking lookup sequence
+        import __main__
+        app = getattr(__main__, "app", None) or next((w for w in tk._default_root.winfo_children() if hasattr(w, "_all_smods_versions")), None)
+
+    if app and hasattr(app, "_active_smods_version"):
+        active_smods = app._active_smods_version()
+        if active_smods:
+            enabled_map["steamodded"] = {"version": active_smods.get("version", ""), "enabled": True}
+
+    for dep_str in mod["dependencies"]:
+        dep_token, op, req_ver = parse_dependency_requirement(dep_str)
+        
+        # Validate against platform dependency trees explicitly
+        if dep_token in ["steamodded", "lovely"]:
+            if dep_token not in enabled_map:
+                # If loader details are completely missing, treat as warning but let user run
+                continue
+            if op and req_ver:
+                current_ver = enabled_map[dep_token].get("version", "")
+                if not compare_versions(current_ver, op, req_ver):
+                    missing_strings.append(f"{dep_str} (Found v{current_ver})")
+            continue
+            
+        if dep_token not in enabled_map:
+            missing_strings.append(dep_str)
+            # if installed but disbaled, mark as fixable
+            if dep_token in all_local_map:
+                target_disabled_mod = all_local_map[dep_token]
+                if target_disabled_mod not in fixable_mods:
+                    fixable_mods.append(target_disabled_mod)
+
+    return missing_strings, fixable_mods
+
 # launch helpers
 def launch_game(game_path: str, vanilla: bool = False):
     p = Path(game_path)
@@ -442,13 +506,39 @@ class JokerDeck(tk.Tk):
         self.state("zoomed")
         self.minsize(700, 500)
         self.configure(bg=BG)
+        self._show_splash()
+        self.update()
+        self.after(50, self._finish_init)
+
+    def _show_splash(self):
+        self._splash = tk.Frame(self, bg=BG)
+        self._splash.place(relx=0, rely=0, relwidth=1, relheight=1)
+        tk.Label(self._splash, text="JokerDeck", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 48, "bold")).pack(expand=True)
+        tk.Label(self._splash, text="loading...", bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 18)).pack(pady=(0, 80))
+
+    def _finish_init(self):
         self._build_ui()
         self._refresh_mods()
+        self._splash.destroy()
 
     def _on_search_change(self, *args):
         if self._search_timer:
             self.after_cancel(self._search_timer)
         self._search_timer = self.after(150, self._render_mods)
+
+    def _enable_all_dependencies(self, fixable_mods: list[dict]):
+        if not fixable_mods:
+            return
+        actions = []
+        for m in fixable_mods:
+            actions.append(ToggleAction(m, m["enabled"]))
+            set_mod_enabled(m, True)
+            self._toggle_times[str(m["path"])] = tk.Tk.winfo_pointerx(self) # track activity
+        
+        self._undo_stack.append(actions)
+        self._redo_stack.clear()
+        self._update_undo_redo_btns()
+        self._update_ui_state_only()
         
     # "re" build.. haha get it? no..? oh ok
     def _rebuild_ui(self):
@@ -763,6 +853,52 @@ class JokerDeck(tk.Tk):
         pool = self.mods + get_uninstalled_mods(self.cfg["mods_dir"])
         return [m for m in pool if str(m["path"]) in self._selected_mods]
 
+    def _update_ui_state_only(self):
+        """Updates states, error cards, and button toggles inline without layout resets."""
+        # Refresh master state list references
+        self.mods = get_mods(self.cfg["mods_dir"])
+        
+        # Build lookup map
+        mod_map = {str(m["path"]): m for m in self.mods}
+        
+        # Re-verify each card layout component cached during rendering loops
+        for item in self._card_cache:
+            m_path_str = item.get("mod_path")
+            if m_path_str not in mod_map:
+                continue
+                
+            updated_mod = mod_map[m_path_str]
+            # Update background state indicators
+            bg_color = PANEL if updated_mod["enabled"] else BG
+            
+            # Recalculate missing dependencies
+            missing_strings, fixable_mods = get_missing_dependency_status(updated_mod, self.mods)
+            
+            # Redraw missing warnings or clean labels inline
+            if "error_label" in item and item["error_label"].winfo_exists():
+                if missing_strings and updated_mod["enabled"]:
+                    item["error_label"].configure(text=f"Missing deps: {', '.join(missing_strings)}", fg=ACCENT)
+                else:
+                    item["error_label"].configure(text="")
+
+            # Update Action Buttons dynamically
+            if "toggle_btn" in item and item["toggle_btn"].winfo_exists():
+                if updated_mod["enabled"]:
+                    item["toggle_btn"].configure(text="🟥 Disable Mod", fg=ACCENT)
+                else:
+                    item["toggle_btn"].configure(text="🟩 Enable Mod", fg=ENABLED)
+                    
+            # Handle conditional visibility of the Enable Deps assistance button
+            if "dep_btn" in item and item["dep_btn"].winfo_exists():
+                if updated_mod["enabled"] and missing_strings and len(fixable_mods) == len(missing_strings):
+                    item["dep_btn"].pack(side="right", padx=4)
+                    # Re-bind clean closures referencing the fresh array references
+                    item["dep_btn"].configure(command=lambda f=fixable_mods: self._enable_all_dependencies(f))
+                else:
+                    item["dep_btn"].pack_forget()
+                    
+        self._update_undo_redo_btns()
+
     def _bulk_enable(self):
         sel = self._get_selected_mods()
         if not sel:
@@ -899,7 +1035,7 @@ class JokerDeck(tk.Tk):
                 m = re.search(r'return\s+"([^"]+)"', path.read_text(encoding="utf-8"))
                 if not m: return None
                 raw = m.group(1)
-            # same slicing as the original — "0.X.Y-SMODS-0.1.2" → "SMODS"
+            # turns "0.X.Y-SMODS-0.1.2" into "SMODS"
             after = raw[raw.find("-") + 1:]
             return after[:after.find("-")] if "-" in after else after
         except:
@@ -1174,22 +1310,22 @@ class JokerDeck(tk.Tk):
                     if not compare_versions(current_installed_version, op, req_version):
                         missing_deps.append(f"{dep} (Found v{current_installed_version})")
 
-            # Trigger emergency warning card if the mod is active but missing requirements
+            # missing
             if is_on and missing_deps:
                 card_bg = "#441111"
                 bdr = "#ff3333"
+                
                 ui["card"].configure(bg=card_bg, highlightbackground=bdr, highlightthickness=2)
                 ui["top"].configure(bg=card_bg)
                 ui["accent"].configure(bg="#ff3333")
                 ui["name"].configure(text=mod["name"], bg=card_bg, fg="#ff5555")
-                
-                # Format an alert explaining what is missing directly within the description slot
+
                 dep_list_str = ", ".join(missing_deps)
+
                 ui["desc"].configure(text=f"CRITICAL ERROR: Missing required dependencies:\n -> [ {dep_list_str} ]", bg=card_bg, fg="#ffaaaa")
                 ui["meta"].configure(bg=card_bg, fg="#ff8888")
                 ui["icon"].configure(bg=card_bg)
-                
-                # Update the button to serve as a fast emergency disable toggle switch
+
                 ui["toggle"].configure(
                     text="Disable Mod", fg="#ff8888", bg="#220505", 
                     activebackground="#3a1111", activeforeground="#ffaaaa",
@@ -1385,6 +1521,8 @@ class JokerDeck(tk.Tk):
                   bg=ACCENT, fg=PANEL, font=(FONT_FAMILY, 18, "bold")).pack(side="right")
         self._btn(btn_frame, "Cancel", win.destroy,
                   bg=BG, fg=SUBTEXT).pack(side="right", padx=(0, 8))
+        self._btn(btn_frame, "Open Mods Folder", lambda: os.startfile(mods_var.get().strip()) if os.path.isdir(mods_var.get().strip()) else messagebox.showerror("JokerDeck", "Mods folder not found."),
+                  bg=BG, fg=SUBTEXT).pack(side="left")
 
     def _open_browse(self):
         win = tk.Toplevel(self)
@@ -1604,12 +1742,17 @@ class JokerDeck(tk.Tk):
             top_bar = tk.Frame(main_frame, bg=BG)
             top_bar.pack(fill="x", pady=(0, 10))
             tk.Label(top_bar, text="available mods", bg=BG, fg=ACCENT, font=(FONT_FAMILY, 24, "bold"), anchor="w").pack(side="left")
+            browse_count_var = tk.StringVar(value="")
 
             search_frm = tk.Frame(main_frame, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
             search_frm.pack(fill="x", pady=(0, 12))
             tk.Label(search_frm, text=" 🔍 ", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=(8, 2), pady=6)
             search_box = tk.Entry(search_frm, bg=PANEL, fg=TEXT, insertbackground=TEXT, font=(FONT_FAMILY, 16), bd=0, highlightthickness=0)
             search_box.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
+
+            shown_bar = tk.Frame(main_frame, bg=BG)
+            shown_bar.pack(fill="x", pady=(0, 4))
+            tk.Label(shown_bar, textvariable=browse_count_var, bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 16), anchor="w").pack(side="left")
 
             canvas = tk.Canvas(main_frame, bg=BG, bd=0, highlightthickness=0)
             scrollbar = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
@@ -1656,21 +1799,56 @@ class JokerDeck(tk.Tk):
                 canvas.unbind_all("<Button-5>")
             ])
 
+            BROWSE_PAGE_SIZE = 10
+            browse_page_state = {"page": 0, "filtered": []}
+
+            # pagination bar (placed between search and canvas)
+            page_bar = tk.Frame(main_frame, bg=BG)
+            page_bar.pack(fill="x", pady=(0, 6))
+            page_prev_btn = self._btn(page_bar, "◀", lambda: go_page(browse_page_state["page"] - 1), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 16), pad=(10, 4))
+            page_prev_btn.pack(side="left", padx=(0, 4))
+            page_label_var = tk.StringVar(value="Page 1 / 1")
+            tk.Label(page_bar, textvariable=page_label_var, bg=BG, fg=SUBTEXT, font=(FONT_FAMILY, 16)).pack(side="left", padx=4)
+            page_next_btn = self._btn(page_bar, "▶", lambda: go_page(browse_page_state["page"] + 1), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 16), pad=(10, 4))
+            page_next_btn.pack(side="left", padx=(4, 0))
+
+            def render_page():
+                for item in card_widgets:
+                    item["frame"].pack_forget()
+                page = browse_page_state["page"]
+                filtered = browse_page_state["filtered"]
+                total_pages = max(1, (len(filtered) + BROWSE_PAGE_SIZE - 1) // BROWSE_PAGE_SIZE)
+                page = max(0, min(page, total_pages - 1))
+                browse_page_state["page"] = page
+                start = page * BROWSE_PAGE_SIZE
+                end = start + BROWSE_PAGE_SIZE
+                for item in card_widgets:
+                    item["frame"].pack_forget()
+                for item in filtered[start:end]:
+                    item["frame"].pack(fill="x", pady=4, padx=2)
+                page_label_var.set(f"Page {page + 1} / {total_pages}")
+                page_prev_btn.configure(fg=TEXT if page > 0 else DISABLED)
+                page_next_btn.configure(fg=TEXT if page < total_pages - 1 else DISABLED)
+                canvas.yview_moveto(0)
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                browse_count_var.set(f"{len(filtered)} shown...")
+                win.after(50, lambda: lazy_load_visible_icons(canvas, scroll_container))
+
+            def go_page(new_page):
+                browse_page_state["page"] = new_page
+                render_page()
+
             def execute_live_search(evt=None):
                 q = search_box.get().lower().strip()
-                for item in card_widgets:
-                    if q in item["name"].lower() or q in item["description"].lower():
-                        item["frame"].pack(fill="x", pady=4, padx=2)
-                    else:
-                        item["frame"].pack_forget()
-                canvas.configure(scrollregion=canvas.bbox("all"))
+                browse_page_state["filtered"] = [item for item in card_widgets if q in item["name"].lower() or q in item["description"].lower()]
+                browse_page_state["page"] = 0
+                render_page()
             search_box.bind("<KeyRelease>", execute_live_search)
 
             # load data cards
             for m in mod_list:
                 m_id = m.get("id", "unknown")
                 card = tk.Frame(scroll_container, bg=PANEL, bd=0, highlightbackground=BORDER, highlightthickness=1)
-                card.pack(fill="x", pady=4, padx=2)
                 tk.Frame(card, bg=DISABLED, height=3).pack(fill="x")
 
                 top = tk.Frame(card, bg=PANEL)
@@ -1751,8 +1929,8 @@ class JokerDeck(tk.Tk):
                     "icon_label": icon_lbl
                 })
 
-            win.after(10, lambda: lazy_load_visible_icons(canvas, scroll_container))
-            win.after(100, lambda: lazy_load_visible_icons(canvas, scroll_container))
+            browse_page_state["filtered"] = card_widgets
+            win.after(200, render_page)
 
         def start_download(mod):
             target_dir = Path(self.cfg["mods_dir"])
