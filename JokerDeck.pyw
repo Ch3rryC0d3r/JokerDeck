@@ -1705,8 +1705,26 @@ class JokerDeck(tk.Tk):
                     owner, repo = parts[0], parts[1]
 
                     # try knwn
+                    fnames_to_try = ["modicon.png", "Icon.png", "icon.png", "Icon-1x.png", "icon-1x.png"]
+                    
+                    # Generate smart guesses using both the repository name and mod_id
+                    for identifier in [repo, mod_id]:
+                        if identifier:
+                            for casing in [identifier, identifier.lower(), identifier.capitalize()]:
+                                c_clean = casing.replace("-", "").replace("_", "")
+                                fnames_to_try.extend([
+                                    f"{casing}_modicon.png", f"{c_clean}_modicon.png",
+                                    f"{casing}icon.png", f"{c_clean}icon.png",
+                                    f"{casing}_icon.png", f"{c_clean}_icon.png",
+                                    f"{casing}_Mod_Icon.png", f"{c_clean}_Mod_Icon.png"
+                                ])
+                    
+                    # Deduplicate list while keeping order intact
+                    seen = set()
+                    fnames_to_try = [x for x in fnames_to_try if not (x in seen or seen.add(x))]
+
                     for br in ["main", "master"]:
-                        for fname in ["modicon.png", "Icon.png", "icon.png", "Icon-1x.png", "icon-1x.png"]:
+                        for fname in fnames_to_try:
                             try:
                                 raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{br}/assets/1x/{fname}"
                                 req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
@@ -1723,15 +1741,22 @@ class JokerDeck(tk.Tk):
 
                     # fallbakc
                     if not img_data:
+                        import re
                         for br in ["main", "master"]:
-                            dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
+                            tree_url = f"https://github.com/{owner}/{repo}/tree/{br}/assets/1x"
                             try:
-                                req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
+                                req = urllib.request.Request(tree_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
                                 with urllib.request.urlopen(req, timeout=10) as resp:
-                                    items = json.loads(resp.read().decode("utf-8"))
-                                    png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
-                                    if png_files:
-                                        sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
+                                    html_content = resp.read().decode("utf-8", errors="ignore")
+                                    
+                                    # Scan the HTML for filenames ending in .png inside an assets/1x context
+                                    png_matches = re.findall(r'assets/1x/([^"\'\s>?&#]+?\.png)', html_content, re.IGNORECASE)
+                                    if png_matches:
+                                        # Clean potential subpath pieces and deduplicate
+                                        cleaned_files = list(set(p.split('/')[-1] for p in png_matches))
+                                        # Sort to prioritize filenames containing the word "icon"
+                                        sorted_pngs = sorted(cleaned_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
+                                        
                                         chosen_file = sorted_pngs[0]
                                         chosen_branch = br
                                         break
@@ -1756,8 +1781,8 @@ class JokerDeck(tk.Tk):
                     im = Image.open(BytesIO(img_data)).convert("RGBA")
                     w, h = im.size
                     
-                    # Square and absolutely no larger than 48x48
-                    if w == h and w <= 48:
+                    # Square and under 48x48, OR any square image with "icon" in the filename
+                    if w == h and (w <= 48 or "icon" in actual_filename.lower()):
                         if 16 < w < 48:
                             im = im.resize((32, 32), Image.Resampling.NEAREST)
                         else:
