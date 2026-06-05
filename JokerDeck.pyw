@@ -241,71 +241,69 @@ def parse_conflict_id(conflict_str: str) -> str:
 
 def normalize_mod_token(name_str: str) -> str:
     s = name_str.strip().lower()
-    # Strip common platform-manager tags (e.g., thunderstore-lovely-0.7.1 -> lovely-0.7.1)
     if s.startswith("thunderstore-"):
         s = s[len("thunderstore-"):]
-    
-    # Strip common GitHub branch download suffixes
     s = re.sub(r'-(?:main|master)$', '', s)
-    
-    # Strip any common trailing version segments (e.g., lovely-0.7.1 -> lovely)
     s = re.sub(r'[-_]v?\d+\.\d+.*$', '', s)
     return s.strip()
+
+def get_dependency_tokens(dep_str: str) -> list[str]:
+    # splits stuff like 'Amulet | Cryptlib' into tokens.
+    raw_tokens = dep_str.split("|")
+    return [normalize_mod_token(t) for t in raw_tokens if t.strip()]
 
 def parse_dependency_requirement(dep_str: str):
     # Matches patterns like "Steamodded (>=1.0.0~BETA-1620a)"
     m = re.match(r"^([^\(]+)(?:\((>=|<=|>|<|==)\s*([^\)]+)\))?", dep_str.strip())
     if not m:
-        return normalize_mod_token(dep_str), None, None
+        return get_dependency_tokens(dep_str), None, None
     
     raw_name = m.group(1).strip()
-    clean_name = normalize_mod_token(raw_name)
+    clean_names = get_dependency_tokens(raw_name)
     op = m.group(2)
     ver = m.group(3).strip() if m.group(3) else None
-    return clean_name, op, ver
+    return clean_names, op, ver
 
 def compare_versions(current_ver: str, op: str, req_ver: str) -> bool:
-    # super smart helper for versions probably
     if not op or not req_ver:
         return True
-        
-    # if nothing, fallback
     if not current_ver or str(current_ver).strip() in ("", "0.0.0", "unknown"):
         return True
 
     def parse_to_comparable_tuple(v_str):
         v_str = str(v_str).strip()
-        # extract continous
         segments = re.findall(r'\d+|[a-zA-Z]+', v_str)
         processed = []
         for seg in segments:
             if seg.isdigit():
                 processed.append(int(seg))
             else:
-                # keep words/letters lowercase for clean standard sorting
                 processed.append(seg.lower())
         return tuple(processed)
 
     c_parts = parse_to_comparable_tuple(current_ver)
     r_parts = parse_to_comparable_tuple(req_ver)
     
-    # pad tuples
     max_len = max(len(c_parts), len(r_parts))
-    c_padded = c_parts + (0,) * (max_len - len(c_parts))
-    r_padded = r_parts + (0,) * (max_len - len(r_parts))
+    c_padded = list(c_parts + (0,) * (max_len - len(c_parts)))
+    r_padded = list(r_parts + (0,) * (max_len - len(r_parts)))
+
+    for i in range(max_len):
+        if type(c_padded[i]) != type(r_padded[i]):
+            c_padded[i] = str(c_padded[i])
+            r_padded[i] = str(r_padded[i])
+
+    c_final = tuple(c_padded)
+    r_final = tuple(r_padded)
 
     try:
-        if op == "==": return c_padded == r_padded
-        if op == ">=": return c_padded >= r_padded
-        if op == "<=": return c_padded <= r_padded
-        if op == ">":  return c_padded > r_padded
-        if op == "<":  return c_padded < r_padded
+        if op == "==": return c_final == r_final
+        if op == ">=": return c_final >= r_final
+        if op == "<=": return c_final <= r_final
+        if op == ">":  return c_final > r_final
+        if op == "<":  return c_final < r_final
     except Exception:
-        if op == "==": return str(current_ver) == str(req_ver)
-        if op == ">=": return str(current_ver) >= str(req_ver)
-        if op == "<=": return str(current_ver) <= str(req_ver)
-        if op == ">":  return str(current_ver) > str(req_ver)
-        if op == "<":  return str(current_ver) < str(req_ver)
+        pass
     return True
 
 def find_conflicts(mods: list[dict]) -> set[str]:
@@ -412,27 +410,57 @@ def get_missing_dependency_status(mod: dict, all_mods: list[dict]) -> tuple[list
     if app and hasattr(app, "_active_smods_version"):
         active_smods = app._active_smods_version()
         if active_smods:
-            enabled_map["steamodded"] = {"version": active_smods.get("version", ""), "enabled": True}
+            smods_ver = active_smods.get("version") or active_smods.get("version_number", "")
+            enabled_map["steamodded"] = {"version": smods_ver, "enabled": True}
+
+    # secondary sweep
+    for m in all_mods:
+        m_id = normalize_mod_token(m.get("manifest_id", ""))
+        f_id = normalize_mod_token(m.get("id", ""))
+        current_ver = m.get("version") or m.get("version_number", "")
+        if m.get("enabled"):
+            enabled_map[m_id] = {"version": current_ver, "enabled": True}
+            enabled_map[f_id] = {"version": current_ver, "enabled": True}
 
     for dep_str in mod["dependencies"]:
-        dep_token, op, req_ver = parse_dependency_requirement(dep_str)
+        dep_tokens, op, req_ver = parse_dependency_requirement(dep_str)
         
-        # Validate against platform dependency trees explicitly
-        if dep_token in ["steamodded", "lovely"]:
-            if dep_token not in enabled_map:
-                # If loader details are completely missing, treat as warning but let user run
+        # if at least ONE of the valid tokens is satisfied
+        any_satisfied = False
+        potential_fixable = []
+        
+        for token in dep_tokens:
+            if token in ["steamodded", "lovely"]:
+                if token not in enabled_map:
+                    any_satisfied = True
+                    break
+                if op and req_ver:
+                    current_ver = enabled_map[token].get("version", "")
+                    if compare_versions(current_ver, op, req_ver):
+                        any_satisfied = True
+                        break
+                else:
+                    any_satisfied = True
+                    break
                 continue
-            if op and req_ver:
-                current_ver = enabled_map[dep_token].get("version", "")
-                if not compare_versions(current_ver, op, req_ver):
-                    missing_strings.append(f"{dep_str} (Found v{current_ver})")
-            continue
-            
-        if dep_token not in enabled_map:
+
+            if token in enabled_map:
+                if op and req_ver:
+                    current_ver = enabled_map[token].get("version", "")
+                    if compare_versions(current_ver, op, req_ver):
+                        any_satisfied = True
+                        break
+                else:
+                    any_satisfied = True
+                    break
+            else:
+                # Keep track of local copies we could turn on to fix this
+                if token in all_local_map:
+                    potential_fixable.append(all_local_map[token])
+
+        if not any_satisfied:
             missing_strings.append(dep_str)
-            # if installed but disbaled, mark as fixable
-            if dep_token in all_local_map:
-                target_disabled_mod = all_local_map[dep_token]
+            for target_disabled_mod in potential_fixable:
                 if target_disabled_mod not in fixable_mods:
                     fixable_mods.append(target_disabled_mod)
 
@@ -474,6 +502,7 @@ class JokerDeck(tk.Tk):
         self.mods = []
         self._search_timer = None
         self._search_var = tk.StringVar()
+        self._compact_var = tk.BooleanVar(value=self.cfg.get("compact_mode", False))
         self._sort_var = tk.StringVar(value="Name (A-Z)")
 
         self._all_authors = []
@@ -641,6 +670,15 @@ class JokerDeck(tk.Tk):
         tk.Label(search_frame, text="  🔍 ", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 18)).pack(side="left")
         self.search_entry = tk.Entry(search_frame, textvariable=self._search_var, bg=PANEL, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT_FAMILY, 18), width=14, bd=4)
         self.search_entry.pack(side="left", padx=(0, 2))
+
+        # compact toggle
+        compact_frame = tk.Frame(bar, bg=BG)
+        compact_frame.pack(side="right", padx=(0, 15))
+        def toggle_compact():
+            self.cfg["compact_mode"] = self._compact_var.get()
+            save_config(self.cfg)
+            self._render_mods()
+        #tk.Checkbutton(compact_frame, text="Compact", variable=self._compact_var, command=toggle_compact, bg=BG, fg=TEXT, selectcolor=PANEL, activebackground=BG, activeforeground=TEXT, font=(FONT_FAMILY, 18), relief="flat", bd=0, padx=4).pack(side="left")
 
         # Sort
         sort_frame = tk.Frame(bar, bg=BG)
@@ -1285,7 +1323,7 @@ class JokerDeck(tk.Tk):
                 active_registry[token] = v_str
 
         for idx, mod in enumerate(filtered):
-            row_idx = (idx // 2) + 1
+            row_idx = idx // 2
             col_idx = idx % 2
             ui = self._get_cached_card(idx)
             ui["_mod_path"] = str(mod["path"])
@@ -1297,18 +1335,32 @@ class JokerDeck(tk.Tk):
             # Evaluate dependency validity using normalized tokens
             missing_deps = []
             for dep in mod.get("dependencies", []):
-                dep_name, op, req_version = parse_dependency_requirement(dep)
-                
+                dep_tokens, op, req_version = parse_dependency_requirement(dep)
+
                 # bypass structural system conditions like "Balatro"
-                if dep_name == "balatro":
+                if dep_tokens == ["balatro"]:
                     continue
-                
-                if dep_name not in active_registry:
-                    missing_deps.append(dep)
-                elif op and req_version:
-                    current_installed_version = active_registry[dep_name]
-                    if not compare_versions(current_installed_version, op, req_version):
-                        missing_deps.append(f"{dep} (Found v{current_installed_version})")
+
+                # check if any of the OR tokens satisfies the dep
+                satisfied = False
+                found_version = None
+                for dep_name in dep_tokens:
+                    if dep_name in active_registry:
+                        if op and req_version:
+                            current_installed_version = active_registry[dep_name]
+                            if compare_versions(current_installed_version, op, req_version):
+                                satisfied = True
+                                found_version = current_installed_version
+                                break
+                        else:
+                            satisfied = True
+                            break
+
+                if not satisfied:
+                    if found_version:
+                        missing_deps.append(f"{dep} (Found v{found_version})")
+                    else:
+                        missing_deps.append(dep)
 
             # missing
             if is_on and missing_deps:
@@ -1430,6 +1482,7 @@ class JokerDeck(tk.Tk):
 
     def _refresh_mods(self):
         self.mods = get_mods(self.cfg["mods_dir"])
+        self._conflicting_paths = find_conflicts(self.mods)
         found_authors = set()
         for m in self.mods:
             if m["author"]:
@@ -1446,6 +1499,7 @@ class JokerDeck(tk.Tk):
             
         self._render_mods()
         self.status_var.set(f"Loaded {len(self.mods)} mod(s).")
+        canvas.yview_moveto(0)
 
     # settings
     def _open_settings(self):
