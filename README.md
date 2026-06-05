@@ -65,7 +65,7 @@ You must follow the **Guidelines** below for your mod to be approved.
 - No malicious, harmful, or illegal content
 - Mods in early states are fine, but must be functional enough to install and load
 - Must be of reasonable quality (i.e. a single throwaway joker with no effort put in wouldn't be approved)
-- If your mod gets taken down from the index, for information, you can check this forum, as I may post what/why I took X down.
+- If your mod gets taken down from the index, for information, you can check [this forum](https://discord.com/channels/1116389027176787968/1511415120515956797), as I may post what/why I took X down.
 
 ---
 
