@@ -46,6 +46,29 @@ then just run `JokerDeck.pyw` and you're good.
 
 ---
 
+# Mod Index
+
+Want to **submit a mod**?
+You can do so **[here](https://github.com/Ch3rryC0d3r/JokerDeckIndex/issues)**. It only takes 4 clicks! Wait time (to be approved) is usually within 24 hours.
+There's also a simple guide for submission **[here](https://github.com/Ch3rryC0d3r/JokerDeck/releases/tag/v1.0.5)**
+
+The mod index is a brand new ([repo](https://github.com/Ch3rryC0d3r/JokerDeckIndex/)) balatro mod index/list, meant just for the JokerDeck app.
+Submitting a mod will only scrape your repo for a json manifest and an icon (if it has) completely automatically,
+downloading a mod in the browser downloads straight from your repo and takes the latest (stable) release. (if there is none, it will take the default branch)
+
+You must follow the **Guidelines** below for your mod to be approved.
+
+# Mod Submission Guidelines
+- Mod must be for Balatro (nothing unrelated)
+- Must have a public repository (GitHub or similar)
+- Repo must contain a valid JSON manifest (mod.json or similar) with at least: `id`, `name`, `description`, `version`
+- No malicious, harmful, or illegal content
+- Mods in early states are fine, but must be functional enough to install and load
+- Must be of reasonable quality (i.e. a single throwaway joker with no effort put in wouldn't be approved)
+- If your mod gets taken down from the index, for information, you can check this forum, as I may post what/why I took X down.
+
+---
+
 ## notes
 
 - mods are managed via Lovely Injector's `.lovelyignore` system - disabling a mod just drops a file in its folder, nothing gets deleted
