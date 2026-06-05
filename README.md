@@ -53,7 +53,7 @@ You can do so **[here](https://github.com/Ch3rryC0d3r/JokerDeckIndex/issues)**. 
 There's also a simple guide for submission **[here](https://github.com/Ch3rryC0d3r/JokerDeck/releases/tag/v1.0.5)**
 
 The mod index is a brand new ([repo](https://github.com/Ch3rryC0d3r/JokerDeckIndex/)) balatro mod index/list, meant just for the JokerDeck app.
-Submitting a mod will only scrape your repo for a json manifest and an icon (if it has) completely automatically,
+Submitting a mod will only scrape your repo for a json manifest and an icon (both required) completely automatically,
 downloading a mod in the browser downloads straight from your repo and takes the latest (stable) release. (if there is none, it will take the default branch)
 
 You must follow the **Guidelines** below for your mod to be approved.
@@ -62,6 +62,7 @@ You must follow the **Guidelines** below for your mod to be approved.
 - Mod must be for Balatro (nothing unrelated)
 - Must have a public repository (GitHub or similar)
 - Repo must contain a valid JSON manifest (mod.json or similar) with at least: `id`, `name`, `description`, `version`
+- Repo must contain a modicon image (in assets/1x/) can be of any name, but preferably containing the word "icon" within it, must be square and greater than 16x16, smaller than 48x48)
 - No malicious, harmful, or illegal content
 - Mods in early states are fine, but must be functional enough to install and load
 - Must be of reasonable quality (i.e. a single throwaway joker with no effort put in wouldn't be approved)
