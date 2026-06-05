@@ -54,7 +54,13 @@ def load_custom_font(font_filename: str) -> str:
 DEFAULT_MODS_DIR  = os.path.join(os.path.expanduser("~"), "AppData", "Roaming", "Balatro", "Mods")
 DEFAULT_GAME_PATH = r"C:\Program Files (x86)\Steam\steamapps\common\Balatro"
 GAME_EXE_NAME     = "Balatro.exe"
-CONFIG_FILE       = Path(__file__).parent / "jokerdeck_config.json"
+
+# save config in the actual folder the exe sits in, not inside a temp extract path
+if getattr(sys, 'frozen', False):
+    CONFIG_FILE = Path(sys.executable).parent / "jokerdeck_config.json"
+else:
+    CONFIG_FILE = Path(__file__).parent / "jokerdeck_config.json"
+
 IGNORE_FILE       = ".lovelyignore"
 UNINSTALLED_DIR   = "Uninstalled"
 SMODS_VERSIONS_DIR = "Versions"
@@ -84,8 +90,6 @@ def apply_theme(dark: bool):
         t["BG"], t["PANEL"], t["TEXT"], t["SUBTEXT"],
         t["BORDER"], t["HOVER"], t["SEL_BG"], t["SEL_BDR"]
     )
-# sorry ill have to burn your eyes just until you can make it to settings
-apply_theme(False)
 
 # config i/o
 def load_config() -> dict:
@@ -100,6 +104,9 @@ def load_config() -> dict:
 def save_config(cfg: dict):
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+_init_cfg = load_config()
+apply_theme(_init_cfg.get("dark_mode", False))
 
 # mod helpers
 def _has_valid_json(entry: Path) -> bool:
@@ -493,7 +500,13 @@ class JokerDeck(tk.Tk):
     def __init__(self):
         super().__init__()
         self.cfg = load_config()
-        apply_theme(self.cfg.get("dark_mode", False)) # light mode
+        
+        # Apply the loaded configurations dynamically right away
+        apply_theme(self.cfg.get("dark_mode", False))
+        global DEFAULT_MODS_DIR, DEFAULT_GAME_PATH
+        DEFAULT_MODS_DIR = self.cfg.get("mods_dir", DEFAULT_MODS_DIR)
+        DEFAULT_GAME_PATH = self.cfg.get("game_path", DEFAULT_GAME_PATH)
+        
         try:
             with open(Path(__file__).parent / "ver.json", "r") as f:
                 self._version = json.load(f).get("version", "")
@@ -1614,7 +1627,7 @@ class JokerDeck(tk.Tk):
                 opener = urllib.request.build_opener(proxy_handler)
                 
                 req = urllib.request.Request(url, headers={"User-Agent": "JokerDeck-Manager"})
-                with opener.open(req, timeout=5) as response:
+                with opener.open(req, timeout=10) as response:
                     data = json.loads(response.read().decode("utf-8"))
                 win.after(10, lambda: setup_browser_ui(data))
             except Exception as e:
@@ -1659,10 +1672,12 @@ class JokerDeck(tk.Tk):
                     t.start()
 
         def fetch_single_icon_thread(repo_url, mod_id, target_label):
+            loaded_successfully = False
             try:
                 img_data = None
                 chosen_branch = None
                 chosen_file = None
+                actual_filename = ""
 
                 # non github platforms
                 if "github.com" not in repo_url.lower():
@@ -1671,9 +1686,10 @@ class JokerDeck(tk.Tk):
                             try:
                                 raw_url = f"{repo_url.rstrip('/')}/raw/branch/{br}/assets/1x/{fallback_name}"
                                 req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
-                                with urllib.request.urlopen(req, timeout=1.5) as resp:
+                                with urllib.request.urlopen(req, timeout=10) as resp: # Safe 10s timeout
                                     img_data = resp.read()
                                     if img_data:
+                                        actual_filename = fallback_name
                                         break
                             except Exception:
                                 continue
@@ -1687,31 +1703,51 @@ class JokerDeck(tk.Tk):
                     if len(parts) < 2:
                         return
                     owner, repo = parts[0], parts[1]
-                    
-                    for br in ["main", "master"]:
-                        dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
-                        try:
-                            req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
-                            with urllib.request.urlopen(req, timeout=2) as resp:
-                                items = json.loads(resp.read().decode("utf-8"))
-                                png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
-                                
-                                if png_files:
-                                    sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
-                                    chosen_file = sorted_pngs[0]
-                                    chosen_branch = br
-                                    break
-                        except Exception:
-                            continue
 
-                    if chosen_file:
-                        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{chosen_branch}/assets/1x/{chosen_file}"
-                        try:
-                            req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
-                            with urllib.request.urlopen(req, timeout=1.5) as resp:
-                                img_data = resp.read()
-                        except Exception:
-                            pass
+                    # try knwn
+                    for br in ["main", "master"]:
+                        for fname in ["modicon.png", "Icon.png", "icon.png", "Icon-1x.png", "icon-1x.png"]:
+                            try:
+                                raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{br}/assets/1x/{fname}"
+                                req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
+                                with urllib.request.urlopen(req, timeout=10) as resp:
+                                    if resp.status == 200:
+                                        img_data = resp.read()
+                                        if img_data:
+                                            actual_filename = fname
+                                            break
+                            except Exception:
+                                continue
+                        if img_data:
+                            break
+
+                    # fallbakc
+                    if not img_data:
+                        for br in ["main", "master"]:
+                            dir_url = f"https://api.github.com/repos/{owner}/{repo}/contents/assets/1x?ref={br}"
+                            try:
+                                req = urllib.request.Request(dir_url, headers={"User-Agent": "JokerDeck-Manager"})
+                                with urllib.request.urlopen(req, timeout=10) as resp:
+                                    items = json.loads(resp.read().decode("utf-8"))
+                                    png_files = [i.get("name", "") for i in items if isinstance(i, dict) and i.get("name", "").lower().endswith(".png")]
+                                    if png_files:
+                                        sorted_pngs = sorted(png_files, key=lambda p: (0 if "icon" in p.lower() else 1, p))
+                                        chosen_file = sorted_pngs[0]
+                                        chosen_branch = br
+                                        break
+                            except Exception:
+                                continue
+
+                        if chosen_file:
+                            raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{chosen_branch}/assets/1x/{chosen_file}"
+                            try:
+                                req = urllib.request.Request(raw_url, headers={"User-Agent": "JokerDeck-Manager"})
+                                with urllib.request.urlopen(req, timeout=10) as resp:
+                                    img_data = resp.read()
+                                    if img_data:
+                                        actual_filename = chosen_file
+                            except Exception:
+                                pass
 
                 if img_data:
                     from io import BytesIO
@@ -1720,25 +1756,39 @@ class JokerDeck(tk.Tk):
                     im = Image.open(BytesIO(img_data)).convert("RGBA")
                     w, h = im.size
                     
-                    if w == h and 16 < w < 48:
-                        im = im.resize((32, 32), Image.Resampling.NEAREST)
+                    # Square and absolutely no larger than 48x48
+                    if w == h and w <= 48:
+                        if 16 < w < 48:
+                            im = im.resize((32, 32), Image.Resampling.NEAREST)
+                        else:
+                            im = im.resize((32, 32), Image.Resampling.LANCZOS)
                         tk_img = ImageTk.PhotoImage(im)
                         win.after(5, lambda: apply_icon(mod_id, tk_img, target_label))
-                    else:
-                        im = im.resize((32, 32), Image.Resampling.LANCZOS)
-                        tk_img = ImageTk.PhotoImage(im)
-                        win.after(5, lambda: apply_icon(mod_id, tk_img, target_label))
+                        loaded_successfully = True
             except Exception:
                 pass
             finally:
                 if mod_id in downloading_icons:
                     downloading_icons.remove(mod_id)
+                
+                # If we are 1000% sure it failed or the image exceeded 48x48, kill the loader on the main GUI thread
+                if not loaded_successfully:
+                    def _clear_loader_safely():
+                        try:
+                            if target_label.winfo_exists():
+                                target_label.running = False
+                                target_label.pack_forget()
+                        except Exception:
+                            pass
+                    win.after(0, _clear_loader_safely)
 
         def apply_icon(mod_id, tk_img, target_label):
             image_cache[mod_id] = tk_img
             try:
                 if target_label.winfo_exists():
-                    target_label.configure(image=tk_img)
+                    target_label.running = False 
+                    target_label.delete("all")
+                    target_label.create_image(16, 16, image=tk_img, anchor="center")
             except Exception:
                 pass
 
@@ -1832,11 +1882,8 @@ class JokerDeck(tk.Tk):
             ])
 
             def _on_mouse_wheel(event):
-                # futureproofing for other platforms
-
-                if event.delta: # windows + macos
+                if event.delta: 
                     canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-                # linux
                 elif event.num == 4: 
                     canvas.yview_scroll(-1, "units")
                 elif event.num == 5: 
@@ -1908,8 +1955,20 @@ class JokerDeck(tk.Tk):
                 top = tk.Frame(card, bg=PANEL)
                 top.pack(fill="x", padx=12, pady=(8, 2))
 
-                icon_lbl = tk.Label(top, bg=PANEL, image=placeholder_img)
+                # Sleek inline loading canvas instead of an un-animated placeholder label
+                icon_lbl = tk.Canvas(top, width=32, height=32, bg=PANEL, bd=0, highlightthickness=0)
                 icon_lbl.pack(side="left", padx=(0, 8))
+                icon_lbl.angle = 0
+                icon_lbl.running = True
+                
+                def animate_spinner(c=icon_lbl):
+                    if not c.winfo_exists() or not getattr(c, 'running', False):
+                        return
+                    c.delete("spinner")
+                    c.create_arc(4, 4, 28, 28, start=c.angle, extent=280, outline=ACCENT, width=3, style="arc", tags="spinner")
+                    c.angle = (c.angle + 8) % 360
+                    win.after(20, lambda: animate_spinner(c))
+                animate_spinner()
 
                 tk.Label(top, text=m.get("name", "unknown"), bg=PANEL, fg=TEXT, font=(FONT_FAMILY, 18, "bold")).pack(side="left")
                 tk.Label(top, text=f"v{m.get('version', '0.0')}", bg=PANEL, fg=SUBTEXT, font=(FONT_FAMILY, 14)).pack(side="left", padx=8, pady=4)
@@ -1993,7 +2052,6 @@ class JokerDeck(tk.Tk):
                 if not messagebox.askyesno("JokerDeck", f"you already have a folder named '{mod['id']}' installed.\n\ndo you want to overwrite it?"):
                     return
 
-            # lock layout down for visual feedback
             load_frame.pack(fill="both", expand=True)
             main_frame.pack_forget()
             load_lbl.configure(text=f"downloading {mod['name']}...\n(starting connection)", fg=TEXT)
@@ -2011,7 +2069,6 @@ class JokerDeck(tk.Tk):
                 tmp_zip = target_dir / f"temp_jokerdeck_{mod['id']}.zip"
                 
                 zip_url = None
-                
                 if "github.com" in repo_url.lower():
                     try:
                         clean_url = repo_url.replace("https://github.com/", "").strip("/")
@@ -2021,7 +2078,7 @@ class JokerDeck(tk.Tk):
                             api_url = f"https://api.github.com/repos/{owner}/{repo}/releases/latest"
                             
                             req = urllib.request.Request(api_url, headers={"User-Agent": "JokerDeck-Manager"})
-                            with urllib.request.urlopen(req, timeout=3) as resp:
+                            with urllib.request.urlopen(req, timeout=10) as resp:
                                 release_info = json.loads(resp.read().decode("utf-8"))
                                 assets = release_info.get("assets", [])
                                 zip_assets = [a["browser_download_url"] for a in assets if a.get("name", "").lower().endswith(".zip")]
@@ -2072,7 +2129,6 @@ class JokerDeck(tk.Tk):
                             continue
                         
                         target_path = final_folder_destination / Path(*parts[1:])
-                        
                         if member.is_dir():
                             target_path.mkdir(parents=True, exist_ok=True)
                         else:
@@ -2086,7 +2142,6 @@ class JokerDeck(tk.Tk):
                 ignore_flag = final_folder_destination / IGNORE_FILE
                 ignore_flag.touch()
 
-                # do smart manifest things idk
                 try:
                     with open(final_folder_destination / "mod.json", "w", encoding="utf-8") as local_json:
                         json.dump(mod, local_json, indent=2)
