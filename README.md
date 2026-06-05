@@ -46,7 +46,7 @@ then just run `JokerDeck.pyw` and you're good.
 
 ---
 
-# Mod Index
+## mod index and guidelines
 
 Want to **submit a mod**?
 You can do so **[here](https://github.com/Ch3rryC0d3r/JokerDeckIndex/issues)**. It only takes 4 clicks! Wait time (to be approved) is usually within 24 hours.
@@ -58,7 +58,7 @@ downloading a mod in the browser downloads straight from your repo and takes the
 
 You must follow the **Guidelines** below for your mod to be approved.
 
-# Mod Submission Guidelines
+### guidelines
 - Mod must be for Balatro (nothing unrelated)
 - Must have a public repository (GitHub or similar)
 - Repo must contain a valid JSON manifest (mod.json or similar) with at least: `id`, `name`, `description`, `version`
